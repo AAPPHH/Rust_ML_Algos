@@ -1,0 +1,15 @@
+[package]
+name = "my_rust_module"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pyo3 = { version = "0.21", features = ["extension-module"] }
+ndarray = "0.15"
+rand = "0.8"
+numpy = "0.21.0"
+ndarray-stats = "0.6.0"
+rayon = "1.9.0"
