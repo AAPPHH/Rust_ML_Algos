@@ -8,8 +8,15 @@ crate-type = ["cdylib"]
 
 [dependencies]
 pyo3 = { version = "0.21", features = ["extension-module"] }
-ndarray = "0.15"
 rand = "0.8"
 numpy = "0.21.0"
-ndarray-stats = "0.6.0"
-rayon = "1.9.0"
+rayon = "1.5"
+ndarray = { version = "0.15", features = ["rayon"] }
+ndarray-parallel = "0.9.1"
+ndarray-linalg = { version = "0.16", features = ["intel-mkl-system"] }
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "abort"

@@ -3,7 +3,11 @@ mod knn;
 mod svm_pegaso;
 mod svm;
 
+pub mod svm_kernel;
+pub mod dual_svm;
+
 use pyo3::prelude::*;
+
 
 #[pymodule]
 fn my_rust_module(_py: Python, m: &PyModule) -> PyResult<()> {

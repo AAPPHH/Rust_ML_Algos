@@ -1,0 +1,187 @@
+use ndarray::{Array1, Array2, Axis};
+use crate::svm_kernel::{KernelType, KernelCache};
+
+#[derive(Clone)]
+pub struct DualSVM {
+    pub alphas: Option<Array1<f64>>,
+    pub support_vectors: Option<Array2<f64>>,
+    pub support_labels: Option<Array1<f64>>,
+    pub bias: f64,
+    pub c: f64,
+    pub kernel: KernelType,
+}
+
+impl DualSVM {
+    pub fn new(kernel: KernelType, c: f64) -> Self {
+        Self {
+            alphas: None,
+            support_vectors: None,
+            support_labels: None,
+            bias: 0.0,
+            c,
+            kernel,
+        }
+    }
+
+pub fn fit(
+    &mut self, 
+    x: &Array2<f64>, 
+    y: &Array1<f64>, 
+    max_iter: usize, 
+    tol: f64
+) {
+    let n = y.len();
+    let mut alphas = Array1::<f64>::zeros(n);
+    let mut bias = 0.0;
+    let c = self.c;
+    let mut passes = 0;
+    let max_passes = 5;
+    let mut iter = 0;
+    let mut active_set: Vec<usize> = (0..n).collect();
+    let mut active_size = n;
+    let shrinking_interval = 100;
+    let min_iter = 100;
+
+    let mut grad = Array1::<f64>::from_iter((0..n).map(|i| -y[i]));
+
+    let mut kernel_cache = KernelCache::new(self.kernel.clone(), x.clone(), 100);
+
+    while (passes < max_passes || iter < min_iter) && iter < max_iter {
+        let mut maximal_violation = 0.0;
+
+
+        while let Some(((ii, jj), violation)) = select_working_set_wss2_active_grad_cache(
+            &alphas, y, &grad, c, x, &self.kernel, &mut kernel_cache, &active_set[..active_size]
+        ) {
+            let i = active_set[ii];
+            let j = active_set[jj];
+            maximal_violation = f64::max(maximal_violation, violation);
+
+            let (yi, yj) = (y[i], y[j]);
+            let (ai_old, aj_old) = (alphas[i], alphas[j]);
+
+            let (l, h) = if yi != yj {
+                (f64::max(0.0, aj_old - ai_old), f64::min(c, c + aj_old - ai_old))
+            } else {
+                (f64::max(0.0, ai_old + aj_old - c), f64::min(c, ai_old + aj_old))
+            };
+            if (l - h).abs() < 1e-12 { break; }
+
+            let kii = kernel_cache.get(i, i);
+            let kjj = kernel_cache.get(j, j);
+            let kij = kernel_cache.get(i, j);
+
+            let eta = 2.0 * kij - kii - kjj;
+            if eta >= 0.0 { break; }
+
+            let (gi, gj) = (grad[i], grad[j]);
+            let mut aj_new = aj_old - yj * (gi - gj) / eta;
+            aj_new = aj_new.clamp(l, h);
+            if (aj_new - aj_old).abs() < 1e-6 { break; }
+            let ai_new = ai_old + yi * yj * (aj_old - aj_new);
+
+            let b1 = bias - gi - yi * (ai_new - ai_old) * kii - yj * (aj_new - aj_old) * kij;
+            let b2 = bias - gj - yi * (ai_new - ai_old) * kij - yj * (aj_new - aj_old) * kjj;
+            bias = if ai_new > 0.0 && ai_new < c { b1 }
+                else if aj_new > 0.0 && aj_new < c { b2 }
+                else { (b1 + b2) / 2.0 };
+
+            alphas[i] = ai_new;
+            alphas[j] = aj_new;
+
+            let delta_ai = ai_new - ai_old;
+            let delta_aj = aj_new - aj_old;
+
+            for &k in &active_set[..active_size] {
+                let ki = kernel_cache.get(i, k);
+                let kj = kernel_cache.get(j, k);
+                grad[k] += ki * yi * delta_ai + kj * yj * delta_aj;
+            }
+        }
+
+            if maximal_violation < tol {
+                passes += 1;
+            } else {
+                passes = 0;
+            }
+            iter += 1;
+        }
+
+        let mask = alphas.mapv(|a| a > 1e-8);
+        let sv_idx: Vec<usize> = mask.indexed_iter().filter(|(_, &m)| m).map(|(i, _)| i).collect();
+        self.support_vectors = Some(x.select(Axis(0), &sv_idx));
+        self.support_labels = Some(y.select(Axis(0), &sv_idx));
+        self.alphas = Some(alphas.select(Axis(0), &sv_idx));
+        self.bias = bias;
+    }
+
+    pub fn decision_function_batch(&self, x: &Array2<f64>) -> Array1<f64> {
+        let sv = self.support_vectors.as_ref().unwrap();
+        let sl = self.support_labels.as_ref().unwrap();
+        let al = self.alphas.as_ref().unwrap();
+        let coeff = al * sl;
+        let bias = self.bias;
+        match &self.kernel {
+            KernelType::Linear => {
+                let w = sv.t().dot(&coeff);
+                x.dot(&w) + bias
+            },
+            _ => {
+                let kernel_mat = self.kernel.compute_kernel(x, sv);
+                kernel_mat.dot(&coeff) + bias
+            }
+        }
+    }
+}
+
+
+fn select_working_set_wss2_active_grad_cache(
+    alphas: &Array1<f64>,
+    y: &Array1<f64>,
+    grad: &Array1<f64>,
+    c: f64,
+    x: &Array2<f64>,
+    kernel: &KernelType,
+    kernel_cache: &mut KernelCache,
+    active_indices: &[usize],
+) -> Option<((usize, usize), f64)> {
+    let mut max_violation = 0.0;
+    let mut i_opt = None;
+
+    for (idx_pos, &i) in active_indices.iter().enumerate() {
+        let alpha = alphas[i];
+        let yi = y[i];
+        let g = grad[i];
+        let violation = yi * g;
+        if ((alpha < c && violation < -1e-3) || (alpha > 0.0 && violation > 1e-3))
+            && violation.abs() > max_violation
+        {
+            max_violation = violation.abs();
+            i_opt = Some(idx_pos);
+        }
+    }
+    let ii = match i_opt { Some(idx) => idx, None => return None };
+    let i = active_indices[ii];
+    let gi = grad[i];
+
+    let kii = kernel_cache.get(i, i);
+
+    let mut max_gain = -1.0;
+    let mut j_opt = None;
+
+    for (idx_pos, &j) in active_indices.iter().enumerate() {
+        if j == i { continue; }
+        let kjj = kernel_cache.get(j, j);
+        let kij = kernel_cache.get(i, j);
+        let eta = 2.0 * kij - kii - kjj;
+        if eta >= 0.0 { continue; }
+        let gain = ((gi - grad[j]) * (gi - grad[j])) / (-eta);
+        if gain > max_gain {
+            max_gain = gain;
+            j_opt = Some(idx_pos);
+        }
+    }
+    let jj = match j_opt { Some(idx) => idx, None => return None };
+
+    Some(((ii, jj), max_violation))
+}

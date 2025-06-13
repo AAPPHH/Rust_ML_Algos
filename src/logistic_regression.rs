@@ -1,9 +1,8 @@
-use numpy::{PyArray1, PyArray2, IntoPyArray};
+use numpy::{PyArray1, IntoPyArray};
 use ndarray::{Array2, Array1, Axis, s};
 use rand::prelude::*;
 use pyo3::prelude::*; 
 
-/// Einfache logistische Regression (Multiclass, one-vs-rest)
 #[pyclass]
 pub struct LogisticRegression {
     weights: Option<Array2<f64>>,
