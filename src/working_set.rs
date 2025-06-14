@@ -13,13 +13,14 @@ pub fn select_working_set_wss2_flat_cache(
 
     for (idx_pos, &i) in active_indices.iter().enumerate() {
         let violation = y[i] * grad[i];
+        let v_abs = violation.abs();
         if ((alphas[i] < c && violation < -1e-3) || (alphas[i] > 0.0 && violation > 1e-3))
-            && violation.abs() > max_violation
+            && v_abs > max_violation
         {
-            max_violation = violation.abs();
+            max_violation = v_abs;
             i_opt = Some(idx_pos);
         }
-    }
+        }
     let ii = i_opt?;
     let i = active_indices[ii];
     let gi = grad[i];
