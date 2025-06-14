@@ -1,6 +1,10 @@
-use crate::svm_kernel::{KernelType, FlatKernelCache};
-use crate::flat_svm::{FlatDataset};
+use crate::flat_dataset::FlatDataset;
+use crate::flat_kernel_cache::FlatKernelCache;
+use crate::svm_kernel::KernelType;
+use crate::working_set::select_working_set_wss2_flat_cache;
+use faer::{Mat, prelude::*};
 
+#[derive(Clone)]
 pub struct DualSVM {
     pub alphas: Option<Vec<f64>>,
     pub support_vectors: Option<FlatDataset>,
@@ -29,7 +33,7 @@ impl DualSVM {
         max_iter: usize, 
         tol: f64
     ) {
-        let n = dataset.n_samples;
+        let n = dataset.n_samples();
         let mut alphas = vec![0.0; n];
         let mut bias = 0.0;
         let c = self.c;
@@ -38,11 +42,9 @@ impl DualSVM {
         let mut iter = 0;
         let mut active_set: Vec<usize> = (0..n).collect();
         let mut active_size = n;
-        let shrinking_interval = 100;
         let min_iter = 100;
 
         let mut grad: Vec<f64> = y.iter().map(|&yi| -yi).collect();
-
         let mut kernel_cache = FlatKernelCache::new(self.kernel.clone(), dataset.clone(), 100);
 
         while (passes < max_passes || iter < min_iter) && iter < max_iter {
@@ -50,7 +52,7 @@ impl DualSVM {
 
             while let Some(((ii, jj), violation)) = select_working_set_wss2_flat_cache(
                 &alphas, &y, &grad, c, &mut kernel_cache, &active_set[..active_size]
-            ){
+            ) {
                 let i = active_set[ii];
                 let j = active_set[jj];
                 maximal_violation = maximal_violation.max(violation);
@@ -108,17 +110,15 @@ impl DualSVM {
         let mask: Vec<bool> = alphas.iter().map(|&a| a > 1e-8).collect();
         let sv_idx: Vec<usize> = mask.iter().enumerate().filter(|&(_, &m)| m).map(|(i, _)| i).collect();
 
-        let sv_data: Vec<f64> = sv_idx.iter()
-            .flat_map(|&i| dataset.get_row(i))
-            .cloned()
-            .collect();
+        let mut sv_mat = Mat::zeros(sv_idx.len(), dataset.n_features());
+        for (row_idx, &i) in sv_idx.iter().enumerate() {
+            for j in 0..dataset.n_features() {
+                let val = dataset.data.read(i, j);
+                sv_mat.write(row_idx, j, val);
+            }
+        }
 
-        let sv_dataset = FlatDataset {
-            data: sv_data,
-            n_samples: sv_idx.len(),
-            n_features: dataset.n_features,
-        };
-
+        let sv_dataset = FlatDataset { data: sv_mat };
         let sv_labels: Vec<f64> = sv_idx.iter().map(|&i| y[i]).collect();
         let sv_alphas: Vec<f64> = sv_idx.iter().map(|&i| alphas[i]).collect();
 
@@ -135,11 +135,11 @@ impl DualSVM {
         let coeff: Vec<f64> = al.iter().zip(sl).map(|(a, s)| a * s).collect();
         let bias = self.bias;
 
-        let mut result = Vec::with_capacity(dataset.n_samples);
-        for i in 0..dataset.n_samples {
+        let mut result = Vec::with_capacity(dataset.n_samples());
+        for i in 0..dataset.n_samples() {
             let xi = dataset.get_row(i);
             let mut sum = 0.0;
-            for j in 0..sv.n_samples {
+            for j in 0..sv.n_samples() {
                 let svj = sv.get_row(j);
                 sum += coeff[j] * self.kernel.compute_pair_flat(xi, svj);
             }
@@ -147,54 +147,4 @@ impl DualSVM {
         }
         result
     }
-}
-
-// Working Set Selection mit KernelCache
-fn select_working_set_wss2_flat_cache(
-    alphas: &[f64],
-    y: &[f64],
-    grad: &[f64],
-    c: f64,
-    kernel_cache: &mut FlatKernelCache,
-    active_indices: &[usize],
-) -> Option<((usize, usize), f64)> {
-    let mut max_violation = 0.0;
-    let mut i_opt = None;
-
-    for (idx_pos, &i) in active_indices.iter().enumerate() {
-        let alpha = alphas[i];
-        let yi = y[i];
-        let g = grad[i];
-        let violation = yi * g;
-        if ((alpha < c && violation < -1e-3) || (alpha > 0.0 && violation > 1e-3))
-            && violation.abs() > max_violation
-        {
-            max_violation = violation.abs();
-            i_opt = Some(idx_pos);
-        }
-    }
-    let ii = match i_opt { Some(idx) => idx, None => return None };
-    let i = active_indices[ii];
-    let gi = grad[i];
-
-    let kii = kernel_cache.get(i, i);
-
-    let mut max_gain = -1.0;
-    let mut j_opt = None;
-
-    for (idx_pos, &j) in active_indices.iter().enumerate() {
-        if j == i { continue; }
-        let kjj = kernel_cache.get(j, j);
-        let kij = kernel_cache.get(i, j);
-        let eta = 2.0 * kij - kii - kjj;
-        if eta >= 0.0 { continue; }
-        let gain = ((gi - grad[j]) * (gi - grad[j])) / (-eta);
-        if gain > max_gain {
-            max_gain = gain;
-            j_opt = Some(idx_pos);
-        }
-    }
-    let jj = match j_opt { Some(idx) => idx, None => return None };
-
-    Some(((ii, jj), max_violation))
 }

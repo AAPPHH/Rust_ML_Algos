@@ -3,9 +3,12 @@ mod knn;
 mod svm_pegaso;
 mod svm;
 
+
+pub mod flat_dataset;
 pub mod svm_kernel;
+pub mod flat_kernel_cache;
 pub mod dual_svm;
-pub mod flat_svm;
+pub mod working_set;
 
 use pyo3::prelude::*;
 

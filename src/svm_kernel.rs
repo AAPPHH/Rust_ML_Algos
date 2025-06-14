@@ -1,7 +1,4 @@
-use std::collections::{HashMap, VecDeque};
-use crate::flat_svm::FlatDataset;
-
-use ndarray::{Array1, Array2, ArrayView1, Zip};
+use faer::{Mat, prelude::*};
 
 #[derive(Clone)]
 pub enum KernelType {
@@ -27,112 +24,38 @@ impl KernelType {
         }
     }
 
-    pub fn compute_kernel(&self, x: &Array2<f64>, y: &Array2<f64>) -> Array2<f64> {
+    pub fn compute_kernel(&self, x: &Mat<f64>, y: &Mat<f64>) -> Mat<f64> {
         match self {
-            KernelType::Linear => {
-                x.dot(&y.t())
-            }
+            KernelType::Linear => x * y.transpose(),
             KernelType::Poly { degree, coef0, gamma } => {
-                let mut mat = x.dot(&y.t());
-                mat.mapv_inplace(|v| (gamma * v + coef0).powi(*degree as i32));
+                let mut mat = x * y.transpose();
+                for i in 0..mat.nrows() {
+                    for j in 0..mat.ncols() {
+                        let v = mat.read(i, j);
+                        mat.write(i, j, (gamma * v + *coef0).powi(*degree as i32));
+                    }
+                }
                 mat
             }
             KernelType::RBF { gamma } => {
-                let x_norms = x
-                    .rows()
-                    .into_iter()
-                    .map(|row| row.dot(&row))
-                    .collect::<Array1<_>>();
-                let y_norms = y
-                    .rows()
-                    .into_iter()
-                    .map(|row| row.dot(&row))
-                    .collect::<Array1<_>>();
-                let dot = x.dot(&y.t());
-                let mut k_mat = dot;
-                Zip::from(k_mat.rows_mut())
-                    .and(x_norms.view())
-                    .for_each(|mut row, &xn| {
-                        Zip::from(&mut row)
-                            .and(y_norms.view())
-                            .for_each(|k_ij, &yn| {
-                                *k_ij = (-gamma * (xn + yn - 2.0 * *k_ij)).exp();
-                            });
-                    });
-                k_mat
+                let x_norms: Vec<f64> = (0..x.nrows())
+                    .map(|i| (0..x.ncols()).map(|j| x.read(i, j).powi(2)).sum())
+                    .collect();
+
+                let y_norms: Vec<f64> = (0..y.nrows())
+                    .map(|i| (0..y.ncols()).map(|j| y.read(i, j).powi(2)).sum())
+                    .collect();
+
+                let mut dot = x * y.transpose();
+
+                for i in 0..dot.nrows() {
+                    for j in 0..dot.ncols() {
+                        let v = dot.read(i, j);
+                        dot.write(i, j, (-gamma * (x_norms[i] + y_norms[j] - 2.0 * v)).exp());
+                    }
+                }
+                dot
             }
         }
-    }
-}
-
-
-
-
-
-
-pub struct FlatKernelCache {
-    kernel: KernelType,
-    dataset: FlatDataset,
-    cache: HashMap<usize, Vec<f64>>,
-    order: VecDeque<usize>,
-    max_size: usize,
-}
-
-#[inline]
-pub fn faer_dot(x: &[f64], y: &[f64]) -> f64 {
-    x.iter().zip(y).map(|(a, b)| a * b).sum()
-}
-
-#[inline]
-pub fn faer_sqdist(x: &[f64], y: &[f64]) -> f64 {
-    x.iter().zip(y).map(|(a, b)| {
-        let d = a - b;
-        d * d
-    }).sum()
-}
-
-
-impl FlatKernelCache {
-    pub fn new(kernel: KernelType, dataset: FlatDataset, max_size: usize) -> Self {
-        Self {
-            kernel,
-            dataset,
-            cache: HashMap::new(),
-            order: VecDeque::new(),
-            max_size,
-        }
-    }
-
-    pub fn get_row(&mut self, i: usize) -> &[f64] {
-        if !self.cache.contains_key(&i) {
-            let row = self.compute_kernel_row(i);
-            self.insert(i, row);
-        }
-        self.cache.get(&i).unwrap()
-    }
-
-    fn compute_kernel_row(&self, i: usize) -> Vec<f64> {
-        let xi = self.dataset.get_row(i);
-        let mut row = Vec::with_capacity(self.dataset.n_samples);
-        for j in 0..self.dataset.n_samples {
-            let xj = self.dataset.get_row(j);
-            let kij = self.kernel.compute_pair_flat(xi, xj);
-            row.push(kij);
-        }
-        row
-    }
-
-    fn insert(&mut self, i: usize, row: Vec<f64>) {
-        self.cache.insert(i, row);
-        self.order.push_back(i);
-        if self.cache.len() > self.max_size {
-            if let Some(old_i) = self.order.pop_front() {
-                self.cache.remove(&old_i);
-            }
-        }
-    }
-
-    pub fn get(&mut self, i: usize, j: usize) -> f64 {
-        self.get_row(i)[j]
     }
 }

@@ -4,8 +4,8 @@ use rayon::prelude::*;
 
 use crate::svm_kernel::KernelType;
 use crate::dual_svm::DualSVM;
-use crate::flat_svm::FlatDataset;
-
+use crate::flat_dataset::FlatDataset;
+use faer::{Mat, prelude::*};
 #[pyclass]
 pub struct SVM {
     classifiers: Vec<(f64, f64, DualSVM)>,
@@ -111,17 +111,16 @@ impl SVM {
                             .map(|(i, _)| i)
                             .collect();
 
-                        // Subset der flachen Daten selektieren:
-                        let x_bin_data: Vec<f64> = idx.iter()
-                            .flat_map(|&i| dataset.get_row(i))
-                            .cloned()
-                            .collect();
+                        // faer Matrix für Subset bauen
+                        let mut x_bin_mat = Mat::<f64>::zeros(idx.len(), n_features);
+                        for (row_idx, &i) in idx.iter().enumerate() {
+                            for j in 0..n_features {
+                                let val = dataset.data.read(i, j);
+                                x_bin_mat.write(row_idx, j, val);
+                            }
+                        }
 
-                        let x_bin = FlatDataset {
-                            data: x_bin_data,
-                            n_samples: idx.len(),
-                            n_features,
-                        };
+                        let x_bin = FlatDataset { data: x_bin_mat };
 
                         let y_bin: Vec<f64> = idx.iter()
                             .map(|&i| if y_arr[i] == class_a { 1.0 } else { -1.0 })
@@ -145,12 +144,6 @@ impl SVM {
         if n_samples == 0 {
             return Ok(vec![]);
         }
-        let n_features = if let Some(sv) = self.classifiers.first() {
-            sv.2.support_vectors.as_ref().map(|s| s.n_features).unwrap_or(0)
-        } else {
-            return Err(PyValueError::new_err("No classifiers trained"));
-        };
-
         let dataset = FlatDataset::from_nested(x);
         let n_classes = self.classes.len();
         let mut votes = vec![vec![0usize; n_classes]; n_samples];
