@@ -43,7 +43,7 @@ start_rust = time.perf_counter()
 for X_train, X_test, y_train, y_test in zip(
         X_train_list, X_test_list, y_train_list, y_test_list):
 
-    rust = my_rust_module.SVM.rbf(gamma=1, c=1.0)
+    rust = my_rust_module.SVM.poly(degree=4, gamma=1, coef0=2.0, c=1.0)
 
     t0 = time.perf_counter()
     rust.fit(X_train.tolist(), y_train.tolist(),
@@ -64,7 +64,7 @@ start_skle = time.perf_counter()
 for X_train, X_test, y_train, y_test in zip(
         X_train_list, X_test_list, y_train_list, y_test_list):
 
-    sk = SVC(kernel='rbf', gamma=1, C=1.0)
+    sk = SVC(kernel='poly', degree=4, gamma=1, coef0=2.0, C=1.0)
 
     t0 = time.perf_counter()
     sk.fit(X_train, y_train)

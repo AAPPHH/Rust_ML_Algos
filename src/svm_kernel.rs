@@ -1,7 +1,7 @@
-use ndarray::{Array2, ArrayView1};
-use ndarray::{Array1, Zip};
 use std::collections::{HashMap, VecDeque};
+use crate::flat_svm::FlatDataset;
 
+use ndarray::{Array1, Array2, ArrayView1, Zip};
 
 #[derive(Clone)]
 pub enum KernelType {
@@ -11,17 +11,22 @@ pub enum KernelType {
 }
 
 impl KernelType {
-    pub fn compute_pair(&self, x: ArrayView1<'_, f64>, y: ArrayView1<'_, f64>) -> f64 {
+    pub fn compute_pair_flat(&self, x: &[f64], y: &[f64]) -> f64 {
         match self {
-            KernelType::Poly { degree, coef0, gamma } =>
-                (gamma * x.dot(&y) + *coef0).powi(*degree as i32),
-            KernelType::RBF { gamma } => {
-                let diff = &x - &y;
-                (-gamma * diff.dot(&diff)).exp()
+            KernelType::Poly { degree, coef0, gamma } => {
+                let dot = x.iter().zip(y.iter()).map(|(a, b)| a * b).sum::<f64>();
+                (gamma * dot + *coef0).powi(*degree as i32)
             }
-            KernelType::Linear => x.dot(&y),
+            KernelType::RBF { gamma } => {
+                let diff = x.iter().zip(y.iter()).map(|(a, b)| (a - b).powi(2)).sum::<f64>();
+                (-gamma * diff).exp()
+            }
+            KernelType::Linear => {
+                x.iter().zip(y.iter()).map(|(a, b)| a * b).sum()
+            }
         }
     }
+
     pub fn compute_kernel(&self, x: &Array2<f64>, y: &Array2<f64>) -> Array2<f64> {
         match self {
             KernelType::Linear => {
@@ -61,46 +66,73 @@ impl KernelType {
 }
 
 
-pub struct KernelCache {
+
+
+
+
+pub struct FlatKernelCache {
     kernel: KernelType,
-    x: Array2<f64>,
-    cache: HashMap<(usize, usize), f64>,
-    order: VecDeque<(usize, usize)>,
+    dataset: FlatDataset,
+    cache: HashMap<usize, Vec<f64>>,
+    order: VecDeque<usize>,
     max_size: usize,
 }
 
-impl KernelCache {
-    pub fn new(kernel: KernelType, x: Array2<f64>, max_size: usize) -> Self {
+#[inline]
+pub fn faer_dot(x: &[f64], y: &[f64]) -> f64 {
+    x.iter().zip(y).map(|(a, b)| a * b).sum()
+}
+
+#[inline]
+pub fn faer_sqdist(x: &[f64], y: &[f64]) -> f64 {
+    x.iter().zip(y).map(|(a, b)| {
+        let d = a - b;
+        d * d
+    }).sum()
+}
+
+
+impl FlatKernelCache {
+    pub fn new(kernel: KernelType, dataset: FlatDataset, max_size: usize) -> Self {
         Self {
             kernel,
-            x,
+            dataset,
             cache: HashMap::new(),
             order: VecDeque::new(),
             max_size,
         }
     }
 
-    pub fn get(&mut self, i: usize, j: usize) -> f64 {
-        let key = if i <= j { (i, j) } else { (j, i) };
-        if let Some(&val) = self.cache.get(&key) {
-            val
-        } else {
-            let xi = self.x.row(i);
-            let xj = self.x.row(j);
-            let val = self.kernel.compute_pair(xi, xj);
-            self.insert(key, val);
-            val
+    pub fn get_row(&mut self, i: usize) -> &[f64] {
+        if !self.cache.contains_key(&i) {
+            let row = self.compute_kernel_row(i);
+            self.insert(i, row);
         }
+        self.cache.get(&i).unwrap()
     }
 
-    fn insert(&mut self, key: (usize, usize), val: f64) {
-        self.cache.insert(key, val);
-        self.order.push_back(key);
+    fn compute_kernel_row(&self, i: usize) -> Vec<f64> {
+        let xi = self.dataset.get_row(i);
+        let mut row = Vec::with_capacity(self.dataset.n_samples);
+        for j in 0..self.dataset.n_samples {
+            let xj = self.dataset.get_row(j);
+            let kij = self.kernel.compute_pair_flat(xi, xj);
+            row.push(kij);
+        }
+        row
+    }
+
+    fn insert(&mut self, i: usize, row: Vec<f64>) {
+        self.cache.insert(i, row);
+        self.order.push_back(i);
         if self.cache.len() > self.max_size {
-            if let Some(old_key) = self.order.pop_front() {
-                self.cache.remove(&old_key);
+            if let Some(old_i) = self.order.pop_front() {
+                self.cache.remove(&old_i);
             }
         }
     }
-}
 
+    pub fn get(&mut self, i: usize, j: usize) -> f64 {
+        self.get_row(i)[j]
+    }
+}

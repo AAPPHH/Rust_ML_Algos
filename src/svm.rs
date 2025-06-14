@@ -1,10 +1,10 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
-use ndarray::{Array1, Array2, Axis};
 use rayon::prelude::*;
 
 use crate::svm_kernel::KernelType;
 use crate::dual_svm::DualSVM;
+use crate::flat_svm::FlatDataset;
 
 #[pyclass]
 pub struct SVM {
@@ -87,16 +87,13 @@ impl SVM {
             "linear" => KernelType::Linear,
             _ => KernelType::Linear,
         };
-        let c_val = self.c;
 
-        let x_flat: Vec<f64> = x.iter().flatten().copied().collect();
-        let y_vec = y;
+        let dataset = FlatDataset::from_nested(x);
+        let c_val = self.c;
 
         let classifiers: Vec<(f64, f64, DualSVM)> = Python::with_gil(|py| {
             py.allow_threads(|| {
-                let x_nd = Array2::from_shape_vec((n_samples, n_features), x_flat)
-                    .expect("shape checked above");
-                let y_arr = Array1::from_vec(y_vec);
+                let y_arr = y;
 
                 let pairs: Vec<(f64, f64)> = classes
                     .iter()
@@ -114,23 +111,31 @@ impl SVM {
                             .map(|(i, _)| i)
                             .collect();
 
-                        let x_bin = Array2::from_shape_fn((idx.len(), n_features), |(r, c)| {
-                            x_nd[[idx[r], c]]
-                        });
-                        let y_bin = Array1::from_iter(
-                            idx.iter().map(|&i| if y_arr[i] == class_a { 1.0 } else { -1.0 }),
-                        );
+                        // Subset der flachen Daten selektieren:
+                        let x_bin_data: Vec<f64> = idx.iter()
+                            .flat_map(|&i| dataset.get_row(i))
+                            .cloned()
+                            .collect();
 
-                        let kernel_mat = kernel_def.compute_kernel(&x_bin, &x_bin);
+                        let x_bin = FlatDataset {
+                            data: x_bin_data,
+                            n_samples: idx.len(),
+                            n_features,
+                        };
+
+                        let y_bin: Vec<f64> = idx.iter()
+                            .map(|&i| if y_arr[i] == class_a { 1.0 } else { -1.0 })
+                            .collect();
 
                         let mut svm = DualSVM::new(kernel_def.clone(), c_val);
-                        svm.fit(&kernel_mat, &y_bin, max_iter, tol);
+                        svm.fit(x_bin, y_bin, max_iter, tol);
 
                         (class_a, class_b, svm)
                     })
                     .collect()
             })
         });
+
         self.classifiers = classifiers;
         Ok(())
     }
@@ -141,37 +146,36 @@ impl SVM {
             return Ok(vec![]);
         }
         let n_features = if let Some(sv) = self.classifiers.first() {
-            sv.2.support_vectors.as_ref().map(|s| s.ncols()).unwrap_or(0)
+            sv.2.support_vectors.as_ref().map(|s| s.n_features).unwrap_or(0)
         } else {
             return Err(PyValueError::new_err("No classifiers trained"));
         };
-        let x_flat: Vec<f64> = x.iter().flatten().copied().collect();
-        let x_nd = Array2::from_shape_vec((n_samples, n_features), x_flat)
-            .map_err(|e| PyValueError::new_err(e.to_string()))?;
 
+        let dataset = FlatDataset::from_nested(x);
         let n_classes = self.classes.len();
-        let mut votes = Array2::<usize>::zeros((n_samples, n_classes));
+        let mut votes = vec![vec![0usize; n_classes]; n_samples];
 
         for (class_a, class_b, svm) in &self.classifiers {
-            let preds = svm.decision_function_batch(&x_nd);
+            let preds = svm.decision_function_batch(&dataset);
             let idx_a = self.classes.iter().position(|c| c == class_a).unwrap();
             let idx_b = self.classes.iter().position(|c| c == class_b).unwrap();
             for (i, &score) in preds.iter().enumerate() {
                 if score >= 0.0 {
-                    votes[[i, idx_a]] += 1;
+                    votes[i][idx_a] += 1;
                 } else {
-                    votes[[i, idx_b]] += 1;
+                    votes[i][idx_b] += 1;
                 }
             }
         }
+
         let preds = votes
-            .outer_iter()
+            .iter()
             .map(|row| {
                 let (idx, _) = row.iter().enumerate().max_by_key(|&(_, cnt)| cnt).unwrap();
                 self.classes[idx]
             })
             .collect();
+
         Ok(preds)
     }
 }
-

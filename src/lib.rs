@@ -5,6 +5,7 @@ mod svm;
 
 pub mod svm_kernel;
 pub mod dual_svm;
+pub mod flat_svm;
 
 use pyo3::prelude::*;
 
