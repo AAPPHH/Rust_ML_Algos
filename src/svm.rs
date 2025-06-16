@@ -1,26 +1,20 @@
-use pyo3::prelude::*;
-use pyo3::exceptions::PyValueError;
 use rayon::prelude::*;
-
 use crate::svm_kernel::KernelType;
 use crate::dual_svm::DualSVM;
 use crate::flat_dataset::FlatDataset;
 use faer::{Mat, prelude::*};
-#[pyclass]
+
 pub struct SVM {
-    classifiers: Vec<(f64, f64, DualSVM)>,
-    classes: Vec<f64>,
-    c: f64,
-    #[pyo3(get)]
-    kernel_type: String,
-    degree: u32,
-    coef0: f64,
-    gamma: f64,
+    pub classifiers: Vec<(f64, f64, DualSVM)>,
+    pub classes: Vec<f64>,
+    pub c: f64,
+    pub kernel_type: String,
+    pub degree: u32,
+    pub coef0: f64,
+    pub gamma: f64,
 }
 
-#[pymethods]
 impl SVM {
-    #[staticmethod]
     pub fn poly(degree: u32, coef0: f64, c: f64, gamma: Option<f64>) -> Self {
         Self {
             classifiers: Vec::new(),
@@ -33,7 +27,6 @@ impl SVM {
         }
     }
 
-    #[staticmethod]
     pub fn rbf(gamma: f64, c: f64) -> Self {
         Self {
             classifiers: Vec::new(),
@@ -46,7 +39,6 @@ impl SVM {
         }
     }
 
-    #[staticmethod]
     pub fn linear(c: f64) -> Self {
         Self {
             classifiers: Vec::new(),
@@ -65,10 +57,10 @@ impl SVM {
         y: Vec<f64>,
         max_iter: usize,
         tol: f64,
-    ) -> PyResult<()> {
+    ) -> Result<(), String> {
         let n_samples = x.len();
         if n_samples == 0 || y.len() != n_samples {
-            return Err(PyValueError::new_err("Empty data or label size mismatch"));
+            return Err("Empty data or label size mismatch".to_string());
         }
         let n_features = x[0].len();
 
@@ -91,58 +83,51 @@ impl SVM {
         let dataset = FlatDataset::from_nested(x);
         let c_val = self.c;
 
-        let classifiers: Vec<(f64, f64, DualSVM)> = Python::with_gil(|py| {
-            py.allow_threads(|| {
-                let y_arr = y;
+        let pairs: Vec<(f64, f64)> = classes
+            .iter()
+            .enumerate()
+            .flat_map(|(i, &a)| classes.iter().skip(i + 1).map(move |&b| (a, b)))
+            .collect();
 
-                let pairs: Vec<(f64, f64)> = classes
+        let classifiers: Vec<(f64, f64, DualSVM)> = pairs
+            .par_iter()
+            .map(|&(class_a, class_b)| {
+                let idx: Vec<usize> = y
                     .iter()
                     .enumerate()
-                    .flat_map(|(i, &a)| classes.iter().skip(i + 1).map(move |&b| (a, b)))
+                    .filter(|(_, &lab)| lab == class_a || lab == class_b)
+                    .map(|(i, _)| i)
                     .collect();
 
-                pairs
-                    .par_iter()
-                    .map(|&(class_a, class_b)| {
-                        let idx: Vec<usize> = y_arr
-                            .iter()
-                            .enumerate()
-                            .filter(|(_, &lab)| lab == class_a || lab == class_b)
-                            .map(|(i, _)| i)
-                            .collect();
+                let mut x_bin_mat = Mat::<f64>::zeros(idx.len(), n_features);
+                for (row_idx, &i) in idx.iter().enumerate() {
+                    for j in 0..n_features {
+                        let val = dataset.data.read(i, j);
+                        x_bin_mat.write(row_idx, j, val);
+                    }
+                }
 
-                        // faer Matrix für Subset bauen
-                        let mut x_bin_mat = Mat::<f64>::zeros(idx.len(), n_features);
-                        for (row_idx, &i) in idx.iter().enumerate() {
-                            for j in 0..n_features {
-                                let val = dataset.data.read(i, j);
-                                x_bin_mat.write(row_idx, j, val);
-                            }
-                        }
+                let x_bin = FlatDataset { data: x_bin_mat };
 
-                        let x_bin = FlatDataset { data: x_bin_mat };
+                let y_bin: Vec<f64> = idx.iter()
+                    .map(|&i| if y[i] == class_a { 1.0 } else { -1.0 })
+                    .collect();
 
-                        let y_bin: Vec<f64> = idx.iter()
-                            .map(|&i| if y_arr[i] == class_a { 1.0 } else { -1.0 })
-                            .collect();
+                let mut svm = DualSVM::new(kernel_def.clone(), c_val);
+                svm.fit(x_bin, y_bin, max_iter, tol);
 
-                        let mut svm = DualSVM::new(kernel_def.clone(), c_val);
-                        svm.fit(x_bin, y_bin, max_iter, tol);
-
-                        (class_a, class_b, svm)
-                    })
-                    .collect()
+                (class_a, class_b, svm)
             })
-        });
+            .collect();
 
         self.classifiers = classifiers;
         Ok(())
     }
 
-    pub fn predict(&self, x: Vec<Vec<f64>>) -> PyResult<Vec<f64>> {
+    pub fn predict(&self, x: Vec<Vec<f64>>) -> Vec<f64> {
         let n_samples = x.len();
         if n_samples == 0 {
-            return Ok(vec![]);
+            return vec![];
         }
         let dataset = FlatDataset::from_nested(x);
         let n_classes = self.classes.len();
@@ -161,14 +146,11 @@ impl SVM {
             }
         }
 
-        let preds = votes
-            .iter()
+        votes.iter()
             .map(|row| {
                 let (idx, _) = row.iter().enumerate().max_by_key(|&(_, cnt)| cnt).unwrap();
                 self.classes[idx]
             })
-            .collect();
-
-        Ok(preds)
+            .collect()
     }
 }

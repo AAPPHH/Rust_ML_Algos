@@ -2,6 +2,7 @@ mod logistic_regression;
 mod knn;
 mod svm_pegaso;
 mod svm;
+mod svm_py_wrapper;
 
 
 pub mod flat_dataset;
@@ -18,6 +19,6 @@ fn my_rust_module(_py: Python, m: &PyModule) -> PyResult<()> {
     m.add_class::<logistic_regression::LogisticRegression>()?;
     m.add_class::<knn::KNNClassifier>()?;
     m.add_class::<svm_pegaso::SVMClassifier>()?;
-    m.add_class::<svm::SVM>()?;
+    m.add_class::<svm_py_wrapper::PySVM>()?;
     Ok(())
 }
