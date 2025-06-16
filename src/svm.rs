@@ -102,10 +102,11 @@ impl SVM {
                 let mut x_bin_mat = Mat::<f64>::zeros(idx.len(), n_features);
                 for (row_idx, &i) in idx.iter().enumerate() {
                     for j in 0..n_features {
-                        let val = dataset.data.read(i, j);
-                        x_bin_mat.write(row_idx, j, val);
+                        let val = dataset.data[(i, j)];
+                        x_bin_mat[(row_idx, j)] = val;
                     }
                 }
+
 
                 let x_bin = FlatDataset { data: x_bin_mat };
 

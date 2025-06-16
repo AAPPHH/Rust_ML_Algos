@@ -1,4 +1,4 @@
-use faer::{Mat, prelude::*};
+use faer::Mat;
 
 #[derive(Clone)]
 pub struct FlatDataset {
@@ -15,7 +15,7 @@ impl FlatDataset {
         for (i, sample) in nested.into_iter().enumerate() {
             assert_eq!(sample.len(), n_features);
             for (j, &val) in sample.iter().enumerate() {
-                mat.write(i, j, val);
+                mat[(i, j)] = val;
             }
         }
 
@@ -30,10 +30,8 @@ impl FlatDataset {
         self.data.ncols()
     }
 
-pub fn get_row(&self, i: usize) -> &[f64] {
-    self.data.as_ref().row(i).try_as_slice().unwrap()
-}
-
-
-
+    pub fn get_row(&self, i: usize) -> Vec<f64> {
+        let cols = self.data.ncols();
+        (0..cols).map(|j| self.data[(i, j)]).collect()
+    }
 }

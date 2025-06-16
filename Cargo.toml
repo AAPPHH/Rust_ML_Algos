@@ -3,8 +3,12 @@ name = "my_rust_module"
 version = "0.1.0"
 edition = "2021"
 
+# [[bin]]
+# name = "svm_benchmark"
+# path = "src/bin/svm_benchmark.rs"
+
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 pyo3 = { version = "0.21", features = ["extension-module"] }
@@ -13,11 +17,11 @@ numpy = "0.21.0"
 rayon = "1.5"
 ndarray = { version = "0.15", features = ["rayon"] }
 ndarray-parallel = "0.9.1"
-faer = { version = "0.18", features = ["std"] }
-
+faer = { version = "0.22.6", features = ["std"] }
 
 [profile.release]
 opt-level = 3
-lto = "fat"
+debug = false
+lto = true
 codegen-units = 1
-panic = "abort"
+strip = true

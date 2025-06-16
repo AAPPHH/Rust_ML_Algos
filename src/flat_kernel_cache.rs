@@ -17,15 +17,15 @@ impl FlatKernelCache {
     }
 
     pub fn get(&mut self, i: usize, j: usize) -> f64 {
-        let val = self.cache.read(i, j);
+        let val = self.cache[(i, j)];
         if !val.is_nan() {
             return val;
         }
-        let xi = self.dataset.get_row(i);
-        let xj = self.dataset.get_row(j);
-        let val = self.kernel.compute_pair_flat(xi, xj);
-        self.cache.write(i, j, val);
-        self.cache.write(j, i, val);
+        let xi = self.dataset.get_row(i);              // Vec<f64>
+        let xj = self.dataset.get_row(j);              // Vec<f64>
+        let val = self.kernel.compute_pair_flat(&xi, &xj);
+        self.cache[(i, j)] = val;
+        self.cache[(j, i)] = val;
         val
     }
 }

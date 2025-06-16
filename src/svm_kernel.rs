@@ -31,27 +31,27 @@ impl KernelType {
                 let mut mat = x * y.transpose();
                 for i in 0..mat.nrows() {
                     for j in 0..mat.ncols() {
-                        let v = mat.read(i, j);
-                        mat.write(i, j, (gamma * v + *coef0).powi(*degree as i32));
+                        let v = mat[(i, j)];
+                        mat[(i, j)] = (gamma * v + *coef0).powi(*degree as i32);
                     }
                 }
                 mat
             }
             KernelType::RBF { gamma } => {
                 let x_norms: Vec<f64> = (0..x.nrows())
-                    .map(|i| (0..x.ncols()).map(|j| x.read(i, j).powi(2)).sum())
+                    .map(|i| (0..x.ncols()).map(|j| x[(i, j)].powi(2)).sum())
                     .collect();
 
                 let y_norms: Vec<f64> = (0..y.nrows())
-                    .map(|i| (0..y.ncols()).map(|j| y.read(i, j).powi(2)).sum())
+                    .map(|i| (0..y.ncols()).map(|j| y[(i, j)].powi(2)).sum())
                     .collect();
 
                 let mut dot = x * y.transpose();
 
                 for i in 0..dot.nrows() {
                     for j in 0..dot.ncols() {
-                        let v = dot.read(i, j);
-                        dot.write(i, j, (-gamma * (x_norms[i] + y_norms[j] - 2.0 * v)).exp());
+                        let v = dot[(i, j)];
+                        dot[(i, j)] = (-gamma * (x_norms[i] + y_norms[j] - 2.0 * v)).exp();
                     }
                 }
                 dot
