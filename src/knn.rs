@@ -1,24 +1,28 @@
 use pyo3::prelude::*;
-use ndarray::{Array2, Array1};
-use pyo3::types::PyList;
+use faer::prelude::*;
+use std::collections::HashMap;
 
 #[pyclass]
 pub struct KNNClassifier {
     k: usize,
-    X: Vec<Vec<f64>>,
-    y: Vec<usize>,
+    X: Option<Mat<f64>>,
+    y: Option<Vec<usize>>,
 }
 
 #[pymethods]
 impl KNNClassifier {
     #[new]
     pub fn new(k: usize) -> Self {
-        KNNClassifier { k, X: Vec::new(), y: Vec::new() }
+        KNNClassifier { k, X: None, y: None }
     }
 
     pub fn fit(&mut self, X: Vec<Vec<f64>>, y: Vec<usize>) {
-        self.X = X;
-        self.y = y;
+        let n_samples = X.len();
+        let n_features = X[0].len();
+        let mat = Mat::from_fn(n_samples, n_features, |i, j| X[i][j]);
+
+        self.X = Some(mat);
+        self.y = Some(y);
     }
 
     pub fn predict(&self, X_test: Vec<Vec<f64>>) -> Vec<usize> {
@@ -28,16 +32,24 @@ impl KNNClassifier {
 
 impl KNNClassifier {
     fn predict_one(&self, x: &Vec<f64>) -> usize {
-        let mut dists: Vec<(f64, usize)> = self.X
-            .iter()
-            .zip(&self.y)
-            .map(|(xi, &yi)| {
-                let dist = xi.iter().zip(x).map(|(a, b)| (a-b).powi(2)).sum::<f64>().sqrt();
-                (dist, yi)
+        let train_X = self.X.as_ref().expect("Model not fitted");
+        let train_y = self.y.as_ref().expect("Model not fitted");
+
+        let mut dists: Vec<(f64, usize)> = (0..train_X.nrows())
+            .map(|i| {
+                let row = train_X.row(i);
+                let dist = row.iter()
+                    .zip(x.iter())
+                    .map(|(a, b)| (a - b).powi(2))
+                    .sum::<f64>()
+                    .sqrt();
+                (dist, train_y[i])
             })
             .collect();
+
         dists.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
-        let mut votes = std::collections::HashMap::new();
+
+        let mut votes = HashMap::new();
         for &(_, label) in dists.iter().take(self.k) {
             *votes.entry(label).or_insert(0) += 1;
         }
