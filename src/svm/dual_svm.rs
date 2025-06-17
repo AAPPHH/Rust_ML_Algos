@@ -1,7 +1,7 @@
-use crate::flat_dataset::FlatDataset;
-use crate::flat_kernel_cache::FlatKernelCache;
-use crate::svm_kernel::KernelType;
-use crate::working_set::select_working_set_wss2_flat_cache;
+use crate::svm::flat_dataset::FlatDataset;
+use crate::svm::flat_kernel_cache::FlatKernelCache;
+use crate::svm::svm_kernel::KernelType;
+use crate::svm::working_set::select_working_set_wss2_flat_cache;
 use faer::Mat;
 
 #[derive(Clone)]

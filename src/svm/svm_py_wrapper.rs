@@ -1,27 +1,27 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
-use crate::svm::SVM as CoreSVM;
+use crate::svm::svm::SVM;
 
 #[pyclass]
 pub struct PySVM {
-    inner: CoreSVM,
+    inner: SVM,
 }
 
 #[pymethods]
 impl PySVM {
     #[staticmethod]
     pub fn poly(degree: u32, coef0: f64, c: f64, gamma: Option<f64>) -> Self {
-        PySVM { inner: CoreSVM::poly(degree, coef0, c, gamma) }
+        PySVM { inner: SVM::poly(degree, coef0, c, gamma) }
     }
 
     #[staticmethod]
     pub fn rbf(gamma: f64, c: f64) -> Self {
-        PySVM { inner: CoreSVM::rbf(gamma, c) }
+        PySVM { inner: SVM::rbf(gamma, c) }
     }
 
     #[staticmethod]
     pub fn linear(c: f64) -> Self {
-        PySVM { inner: CoreSVM::linear(c) }
+        PySVM { inner: SVM::linear(c) }
     }
 
     pub fn fit(&mut self, x: Vec<Vec<f64>>, y: Vec<f64>, max_iter: usize, tol: f64) -> PyResult<()> {

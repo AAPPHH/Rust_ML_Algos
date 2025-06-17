@@ -1,7 +1,7 @@
 use rayon::prelude::*;
-use crate::svm_kernel::KernelType;
-use crate::dual_svm::DualSVM;
-use crate::flat_dataset::FlatDataset;
+use crate::svm::svm_kernel::KernelType;
+use crate::svm::dual_svm::DualSVM;
+use crate::svm::flat_dataset::FlatDataset;
 use faer::{Mat, prelude::*};
 
 pub struct SVM {

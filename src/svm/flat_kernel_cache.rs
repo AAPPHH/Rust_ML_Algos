@@ -1,5 +1,5 @@
-use crate::flat_dataset::FlatDataset;
-use crate::svm_kernel::KernelType;
+use crate::svm::flat_dataset::FlatDataset;
+use crate::svm::svm_kernel::KernelType;
 use faer::Mat;
 
 #[derive(Clone)]

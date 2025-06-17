@@ -1,4 +1,4 @@
-use crate::flat_kernel_cache::FlatKernelCache;
+use crate::svm::flat_kernel_cache::FlatKernelCache;
 
 pub fn select_working_set_wss2_flat_cache(
     alphas: &[f64],
