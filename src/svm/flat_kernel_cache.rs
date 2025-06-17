@@ -6,7 +6,7 @@ use faer::Mat;
 pub struct FlatKernelCache {
     kernel: KernelType,
     dataset: FlatDataset,
-    cache: Mat<f64>, 
+    cache: Mat<f64>,
 }
 
 impl FlatKernelCache {
@@ -17,13 +17,21 @@ impl FlatKernelCache {
     }
 
     pub fn get(&mut self, i: usize, j: usize) -> f64 {
-        let val = self.cache[(i, j)];
-        if !val.is_nan() {
-            return val;
+        let cached = self.cache[(i, j)];
+        if !cached.is_nan() {
+            return cached;
         }
-        let xi = self.dataset.get_row(i);              // Vec<f64>
-        let xj = self.dataset.get_row(j);              // Vec<f64>
-        let val = self.kernel.compute_pair_flat(&xi, &xj);
+
+        let ncols   = self.dataset.data.ncols();
+        let offset_i = i * ncols;
+        let offset_j = j * ncols;
+        let base_ptr = self.dataset.data.as_ptr();
+
+        let xi = unsafe { std::slice::from_raw_parts(base_ptr.add(offset_i), ncols) };
+        let xj = unsafe { std::slice::from_raw_parts(base_ptr.add(offset_j), ncols) };
+
+        let val = self.kernel.compute_pair_flat(xi, xj);
+
         self.cache[(i, j)] = val;
         self.cache[(j, i)] = val;
         val
