@@ -2,7 +2,7 @@ use rayon::prelude::*;
 use crate::svm::svm_kernel::KernelType;
 use crate::svm::dual_svm::DualSVM;
 use crate::svm::flat_dataset::FlatDataset;
-use faer::{Mat, prelude::*};
+use faer::Mat;
 
 pub struct SVM {
     pub classifiers: Vec<(f64, f64, DualSVM)>,
@@ -101,12 +101,12 @@ impl SVM {
 
                 let mut x_bin_mat = Mat::<f64>::zeros(idx.len(), n_features);
                 for (row_idx, &i) in idx.iter().enumerate() {
-                    for j in 0..n_features {
-                        let val = dataset.data[(i, j)];
-                        x_bin_mat[(row_idx, j)] = val;
+                    let src_row = dataset.data.row(i);
+                    let mut dst_row = x_bin_mat.row_mut(row_idx);
+                    for j in 0..src_row.ncols() {
+                        dst_row[j] = src_row[j];
                     }
                 }
-
 
                 let x_bin = FlatDataset { data: x_bin_mat };
 

@@ -1,4 +1,4 @@
-use faer::Mat;
+use faer::{Mat, MatRef, RowRef};
 
 #[derive(Clone)]
 pub struct FlatDataset {
@@ -30,8 +30,11 @@ impl FlatDataset {
         self.data.ncols()
     }
 
-    pub fn get_row(&self, i: usize) -> Vec<f64> {
-        let cols = self.data.ncols();
-        (0..cols).map(|j| self.data[(i, j)]).collect()
+    pub fn get_row(&self, i: usize) -> RowRef<'_, f64> {
+        self.data.row(i)
+    }
+    
+    pub fn as_ref(&self) -> MatRef<'_, f64> {
+        self.data.as_ref()
     }
 }

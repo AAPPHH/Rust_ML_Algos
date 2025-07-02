@@ -77,3 +77,13 @@ print(f"sklearn    Acc: {np.mean(acc_skle):.3f} ± {np.std(acc_skle):.3f}")
 print(f"sklearn-Fit-Zeit Mittel: {np.mean(fit_times_skle):.4f}s  "
       f"(Σ {np.sum(fit_times_skle):.2f}s)")
 print()
+total_rust = np.sum(fit_times_rust)
+total_skle = np.sum(fit_times_skle)
+
+speedup_total = total_skle / total_rust if total_rust > 0 else float('inf')
+
+if speedup_total >= 1:
+    print(f"(Gesamtzeit) Rust ist {speedup_total:.2f}× schneller als scikit-learn.")
+else:
+    print(f"(Gesamtzeit) Rust ist {1/speedup_total:.2f}× langsamer als scikit-learn.")
+

@@ -18,6 +18,7 @@ rayon = "1.5"
 ndarray = { version = "0.15", features = ["rayon"] }
 ndarray-parallel = "0.9.1"
 faer = { version = "0.22.6", features = ["std"] }
+lru = "0.12"
 
 [profile.release]
 opt-level = 3

@@ -1,4 +1,4 @@
-use faer::{Mat, prelude::*};
+use faer::{Mat, MatRef, RowRef};
 
 #[derive(Clone)]
 pub enum KernelType {
@@ -8,6 +8,32 @@ pub enum KernelType {
 }
 
 impl KernelType {
+    #[inline(always)]
+    pub fn compute_pair_row(&self, x: &RowRef<'_, f64>, y: &RowRef<'_, f64>) -> f64 {
+        match self {
+            KernelType::Poly { degree, coef0, gamma } => {
+                let dot = (0..x.ncols())
+                    .map(|i| x[i] * y[i])
+                    .sum::<f64>();
+                (gamma * dot + *coef0).powi(*degree as i32)
+            }
+            KernelType::RBF { gamma } => {
+                let diff_sq = (0..x.ncols())
+                    .map(|i| {
+                        let d = x[i] - y[i];
+                        d * d
+                    })
+                    .sum::<f64>();
+                (-gamma * diff_sq).exp()
+            }
+            KernelType::Linear => {
+                (0..x.ncols())
+                    .map(|i| x[i] * y[i])
+                    .sum()
+            }
+        }
+    }
+
     pub fn compute_pair_flat(&self, x: &[f64], y: &[f64]) -> f64 {
         match self {
             KernelType::Poly { degree, coef0, gamma } => {
@@ -39,11 +65,17 @@ impl KernelType {
             }
             KernelType::RBF { gamma } => {
                 let x_norms: Vec<f64> = (0..x.nrows())
-                    .map(|i| (0..x.ncols()).map(|j| x[(i, j)].powi(2)).sum())
+                    .map(|i| {
+                        let row = x.row(i);
+                        (0..row.ncols()).map(|j| row[j].powi(2)).sum()
+                    })
                     .collect();
 
                 let y_norms: Vec<f64> = (0..y.nrows())
-                    .map(|i| (0..y.ncols()).map(|j| y[(i, j)].powi(2)).sum())
+                    .map(|i| {
+                        let row = y.row(i);
+                        (0..row.ncols()).map(|j| row[j].powi(2)).sum()
+                    })
                     .collect();
 
                 let mut dot = x * y.transpose();
