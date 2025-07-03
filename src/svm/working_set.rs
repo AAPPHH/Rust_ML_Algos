@@ -95,7 +95,6 @@ impl WorkingSetSelector {
                 self.indices.push(idx);
             }
         } else {
-            // Sequenzielle Version für kleine aktive Sets
             for &i in active_indices {
                 let ai = unsafe { *alphas.get_unchecked(i) };
                 let yi_gi = unsafe { y.get_unchecked(i) * self.grad_cache.get_unchecked(i) };

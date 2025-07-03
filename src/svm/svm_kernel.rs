@@ -55,7 +55,6 @@ impl KernelType {
         let n = x.ncols();
         let mut sum = 0.0;
         
-        // Unroll für bessere Performance
         let mut i = 0;
         while i + 4 <= n {
             let d0 = x[i] - y[i];
@@ -67,7 +66,6 @@ impl KernelType {
             i += 4;
         }
         
-        // Rest
         while i < n {
             let d = x[i] - y[i];
             sum += d * d;
