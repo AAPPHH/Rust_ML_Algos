@@ -3,6 +3,7 @@ use crate::svm::svm_kernel::KernelType;
 use faer::Mat;
 use lru::LruCache;
 use std::num::NonZeroUsize;
+use rayon::prelude::*;
 
 #[derive(Clone)]
 pub struct FlatKernelCache {
@@ -17,17 +18,27 @@ pub struct FlatKernelCache {
 impl FlatKernelCache {
     pub fn new(kernel: KernelType, dataset: FlatDataset, size: usize) -> Self {
         let n = dataset.n_samples();
+        let available_bytes = 8 * 1024 * 1024 * 1024_usize;
+        let bytes_per_entry = 16;
+        let max_entries = available_bytes / bytes_per_entry;
+        let optimal_size = (n * n / 4).min(max_entries).max(size);
         
         let mut kernel_diag = vec![0.0; n];
-        for i in 0..n {
-            let row = dataset.get_row(i);
-            kernel_diag[i] = kernel.compute_pair_row(&row, &row);
-        }
+        kernel_diag.par_chunks_mut(256).enumerate().for_each(|(chunk_idx, chunk)| {
+            let start = chunk_idx * 256;
+            for (i, val) in chunk.iter_mut().enumerate() {
+                let idx = start + i;
+                if idx < n {
+                    let row = dataset.get_row(idx);
+                    *val = kernel.compute_pair_row(&row, &row);
+                }
+            }
+        });
         
         FlatKernelCache { 
             kernel, 
             dataset, 
-            cache: LruCache::new(NonZeroUsize::new(size.max(1)).unwrap()),
+            cache: LruCache::new(NonZeroUsize::new(optimal_size).unwrap()),
             kernel_diag,
             hits: 0,
             misses: 0,
@@ -70,27 +81,22 @@ impl FlatKernelCache {
     pub fn compute_kernel_rows(&mut self, indices: &[usize], target: usize) -> Mat<f64> {
         let mut result = Mat::zeros(indices.len(), 1);
         
+        const PREFETCH_DISTANCE: usize = 8;
+        
         let mut idx = 0;
-        while idx + 8 <= indices.len() {
-            if idx + 8 < indices.len() {
-                std::hint::black_box(&indices[idx + 8]);
+        while idx < indices.len() {
+            if idx + PREFETCH_DISTANCE < indices.len() {
+                for k in 0..PREFETCH_DISTANCE.min(indices.len() - idx - PREFETCH_DISTANCE) {
+                    std::hint::black_box(&indices[idx + PREFETCH_DISTANCE + k]);
+                }
             }
             
-            result[(idx, 0)] = self.get(indices[idx], target);
-            result[(idx + 1, 0)] = self.get(indices[idx + 1], target);
-            result[(idx + 2, 0)] = self.get(indices[idx + 2], target);
-            result[(idx + 3, 0)] = self.get(indices[idx + 3], target);
-            result[(idx + 4, 0)] = self.get(indices[idx + 4], target);
-            result[(idx + 5, 0)] = self.get(indices[idx + 5], target);
-            result[(idx + 6, 0)] = self.get(indices[idx + 6], target);
-            result[(idx + 7, 0)] = self.get(indices[idx + 7], target);
-            idx += 8;
-        }
-        
-        // Rest
-        while idx < indices.len() {
-            result[(idx, 0)] = self.get(indices[idx], target);
-            idx += 1;
+            let batch_end = (idx + 8).min(indices.len());
+            for i in idx..batch_end {
+                result[(i, 0)] = self.get(indices[i], target);
+            }
+            
+            idx = batch_end;
         }
         
         result

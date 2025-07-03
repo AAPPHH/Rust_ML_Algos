@@ -3,6 +3,7 @@ use crate::svm::flat_kernel_cache::FlatKernelCache;
 use crate::svm::svm_kernel::KernelType;
 use crate::svm::working_set::{WorkingSetSelector, ShrinkingWorkingSet};
 use faer::Mat;
+use rayon::iter::{IntoParallelIterator, ParallelIterator, IndexedParallelIterator};
 
 #[derive(Clone)]
 pub struct DualSVM {
@@ -246,36 +247,38 @@ impl DualSVM {
         true
     }
 
-    #[inline(always)]
-    fn update_gradient_scalar(
-        grad: &mut [f64],
-        kernel_cache: &mut FlatKernelCache,
-        i: usize,
-        j: usize,
-        yi_delta_ai: f64,
-        yj_delta_aj: f64,
-    ) {
-        let batch_size = 64;
-        let n = grad.len();
+#[inline(always)]
+fn update_gradient_scalar(
+    grad: &mut [f64],
+    kernel_cache: &mut FlatKernelCache,
+    i: usize,
+    j: usize,
+    yi_delta_ai: f64,
+    yj_delta_aj: f64,
+) {
+    let n = grad.len();
+    
+    const BATCH_SIZE: usize = 256;
+    
+    for batch_start in (0..n).step_by(BATCH_SIZE) {
+        let batch_end = (batch_start + BATCH_SIZE).min(n);
         
-        for batch_start in (0..n).step_by(batch_size) {
-            let batch_end = (batch_start + batch_size).min(n);
-            
-            // Prefetch nächste Batch
-            if batch_end < n {
-                std::hint::black_box(&grad[batch_end]);
-            }
-            
-            for k in batch_start..batch_end {
-                let ki = kernel_cache.get(i, k);
-                let kj = kernel_cache.get(j, k);
-                unsafe {
-                    let grad_k = grad.get_unchecked_mut(k);
-                    *grad_k += yi_delta_ai * ki + yj_delta_aj * kj;
-                }
+        let mut ki_batch = vec![0.0; batch_end - batch_start];
+        let mut kj_batch = vec![0.0; batch_end - batch_start];
+        
+        for (idx, k) in (batch_start..batch_end).enumerate() {
+            ki_batch[idx] = kernel_cache.get(i, k);
+            kj_batch[idx] = kernel_cache.get(j, k);
+        }
+        
+        for (idx, k) in (batch_start..batch_end).enumerate() {
+            unsafe {
+                let grad_k = grad.get_unchecked_mut(k);
+                *grad_k += yi_delta_ai * ki_batch[idx] + yj_delta_aj * kj_batch[idx];
             }
         }
     }
+}
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[target_feature(enable = "avx2")]
@@ -374,10 +377,6 @@ impl DualSVM {
         self.bias = bias;
     }
 
-// Ersetze die decision_function_batch in dual_svm.rs mit dieser Version
-
-// Ersetze die decision_function_batch in dual_svm.rs mit dieser Version
-
 pub fn decision_function_batch(&self, dataset: &FlatDataset) -> Vec<f64> {
     let sv = self.support_vectors.as_ref().unwrap();
     let sl = self.support_labels.as_ref().unwrap();
@@ -386,64 +385,59 @@ pub fn decision_function_batch(&self, dataset: &FlatDataset) -> Vec<f64> {
     
     match &self.kernel {
         KernelType::Linear => {
-            // Optimierte lineare Kernel Implementation
             let n_features = sv.n_features();
             let n_sv = sv.n_samples();
+            let n_samples = dataset.n_samples();
             
-            // Berechne w einmalig mit optimierter Loop
             let mut w = vec![0.0; n_features];
             
-            // Unroll loop für bessere Performance
-            for i in 0..n_sv {
-                let alpha_y = al[(i, 0)] * sl[(i, 0)];
-                let sv_row = sv.data.row(i);
+            if n_sv > 100 {
+                use std::sync::Mutex;
+                let w_mutex = Mutex::new(vec![0.0; n_features]);
                 
-                // Vektorisierte Addition
-                let mut j = 0;
-                while j + 8 <= n_features {
-                    unsafe {
-                        *w.get_unchecked_mut(j) += alpha_y * sv_row[j];
-                        *w.get_unchecked_mut(j + 1) += alpha_y * sv_row[j + 1];
-                        *w.get_unchecked_mut(j + 2) += alpha_y * sv_row[j + 2];
-                        *w.get_unchecked_mut(j + 3) += alpha_y * sv_row[j + 3];
-                        *w.get_unchecked_mut(j + 4) += alpha_y * sv_row[j + 4];
-                        *w.get_unchecked_mut(j + 5) += alpha_y * sv_row[j + 5];
-                        *w.get_unchecked_mut(j + 6) += alpha_y * sv_row[j + 6];
-                        *w.get_unchecked_mut(j + 7) += alpha_y * sv_row[j + 7];
+                (0..n_sv).into_par_iter().chunks(64).for_each(|chunk| {
+                    let mut local_w = vec![0.0; n_features];
+                    
+                    for i in chunk {
+                        let alpha_y = al[(i, 0)] * sl[(i, 0)];
+                        let sv_row = sv.data.row(i);
+                        
+                        for j in 0..n_features {
+                            local_w[j] += alpha_y * sv_row[j];
+                        }
                     }
-                    j += 8;
-                }
+                    
+                    let mut w_global = w_mutex.lock().unwrap();
+                    for j in 0..n_features {
+                        w_global[j] += local_w[j];
+                    }
+                });
                 
-                // Handle remaining
-                while j < n_features {
-                    unsafe {
-                        *w.get_unchecked_mut(j) += alpha_y * sv_row[j];
+                w = w_mutex.into_inner().unwrap();
+            } else {
+                for i in 0..n_sv {
+                    let alpha_y = al[(i, 0)] * sl[(i, 0)];
+                    let sv_row = sv.data.row(i);
+                    
+                    for j in 0..n_features {
+                        w[j] += alpha_y * sv_row[j];
                     }
-                    j += 1;
                 }
             }
             
-            // Optimierte Matrix-Vektor Multiplikation
-            let n_samples = dataset.n_samples();
-            let mut result = vec![0.0; n_samples];
-            
-            // Parallele Verarbeitung für große Datasets
             if n_samples > 1000 {
-                use rayon::prelude::*;
-                result.par_iter_mut()
-                    .enumerate()
-                    .for_each(|(i, res)| {
+                (0..n_samples).into_par_iter()
+                    .map(|i| {
                         let row = dataset.get_row(i);
                         let mut sum = 0.0;
                         
-                        // Vektorisierte Dot-Product
                         let mut j = 0;
-                        while j + 4 <= n_features {
-                            sum += row[j] * w[j] + 
-                                   row[j+1] * w[j+1] + 
-                                   row[j+2] * w[j+2] + 
-                                   row[j+3] * w[j+3];
-                            j += 4;
+                        while j + 8 <= n_features {
+                            sum += row[j] * w[j] + row[j+1] * w[j+1] + 
+                                   row[j+2] * w[j+2] + row[j+3] * w[j+3] +
+                                   row[j+4] * w[j+4] + row[j+5] * w[j+5] +
+                                   row[j+6] * w[j+6] + row[j+7] * w[j+7];
+                            j += 8;
                         }
                         
                         while j < n_features {
@@ -451,10 +445,11 @@ pub fn decision_function_batch(&self, dataset: &FlatDataset) -> Vec<f64> {
                             j += 1;
                         }
                         
-                        *res = sum + bias;
-                    });
+                        sum + bias
+                    })
+                    .collect()
             } else {
-                // Sequenzielle Version für kleine Datasets
+                let mut result = vec![0.0; n_samples];
                 for i in 0..n_samples {
                     let row = dataset.get_row(i);
                     let mut sum = 0.0;
@@ -465,75 +460,47 @@ pub fn decision_function_batch(&self, dataset: &FlatDataset) -> Vec<f64> {
                     
                     result[i] = sum + bias;
                 }
+                result
             }
-            
-            result
         }
         _ => {
-            // Optimierte nicht-lineare Kernel Implementation
             let n = dataset.n_samples();
             let n_sv = sv.n_samples();
             
-            // Vorberechnung der Koeffizienten
-            let mut coeffs = vec![0.0; n_sv];
-            for i in 0..n_sv {
-                coeffs[i] = al[(i, 0)] * sl[(i, 0)];
-            }
+            let coeffs: Vec<f64> = (0..n_sv)
+                .map(|i| al[(i, 0)] * sl[(i, 0)])
+                .collect();
             
-            // Parallele Verarbeitung für große Datasets
             if n > 100 {
-                use rayon::prelude::*;
-                
                 (0..n).into_par_iter()
-                    .map(|i| {
-                        let xi = dataset.get_row(i);
-                        let mut sum = 0.0;
-                        
-                        // Cache-freundliche Iteration
-                        for j in 0..n_sv {
-                            let svj = sv.get_row(j);
-                            sum += coeffs[j] * self.kernel.compute_pair_row(&xi, &svj);
-                        }
-                        
-                        sum + bias
+                    .chunks(32)
+                    .flat_map(|chunk| {
+                        chunk.into_iter().map(|i| {
+                            let xi = dataset.get_row(i);
+                            let mut sum = 0.0;
+                            
+                            for j in 0..n_sv {
+                                let svj = sv.get_row(j);
+                                sum += coeffs[j] * self.kernel.compute_pair_row(&xi, &svj);
+                            }
+                            
+                            sum + bias
+                        }).collect::<Vec<_>>()
                     })
                     .collect()
             } else {
-                // Sequenzielle Version mit Batch-Processing
                 let mut result = vec![0.0; n];
-                let batch_size = 32;
                 
-                for batch_start in (0..n).step_by(batch_size) {
-                    let batch_end = (batch_start + batch_size).min(n);
+                for i in 0..n {
+                    let xi = dataset.get_row(i);
+                    let mut sum = 0.0;
                     
-                    for i in batch_start..batch_end {
-                        let xi = dataset.get_row(i);
-                        let mut sum = 0.0;
-                        
-                        // Unroll inner loop für bessere Performance
-                        let mut j = 0;
-                        while j + 4 <= n_sv {
-                            let sv0 = sv.get_row(j);
-                            let sv1 = sv.get_row(j + 1);
-                            let sv2 = sv.get_row(j + 2);
-                            let sv3 = sv.get_row(j + 3);
-                            
-                            sum += coeffs[j] * self.kernel.compute_pair_row(&xi, &sv0);
-                            sum += coeffs[j + 1] * self.kernel.compute_pair_row(&xi, &sv1);
-                            sum += coeffs[j + 2] * self.kernel.compute_pair_row(&xi, &sv2);
-                            sum += coeffs[j + 3] * self.kernel.compute_pair_row(&xi, &sv3);
-                            
-                            j += 4;
-                        }
-                        
-                        while j < n_sv {
-                            let svj = sv.get_row(j);
-                            sum += coeffs[j] * self.kernel.compute_pair_row(&xi, &svj);
-                            j += 1;
-                        }
-                        
-                        result[i] = sum + bias;
+                    for j in 0..n_sv {
+                        let svj = sv.get_row(j);
+                        sum += coeffs[j] * self.kernel.compute_pair_row(&xi, &svj);
                     }
+                    
+                    result[i] = sum + bias;
                 }
                 
                 result
