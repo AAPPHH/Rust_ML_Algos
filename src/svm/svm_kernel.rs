@@ -1,4 +1,4 @@
-use faer::{Mat, MatRef, RowRef};
+use faer::{Mat, RowRef};
 
 #[derive(Clone)]
 pub enum KernelType {

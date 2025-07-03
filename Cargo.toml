@@ -22,7 +22,20 @@ lru = "0.12"
 
 [profile.release]
 opt-level = 3
-debug = false
-lto = true
+lto = "fat"
 codegen-units = 1
+panic = "abort"
 strip = true
+overflow-checks = false
+incremental = false
+
+[profile.release-generic]
+inherits = "release"
+target-cpu = "x86-64-v3"
+
+[profile.bench]
+inherits = "release"
+debug = true
+
+[build-dependencies]
+cc = "1.0"
