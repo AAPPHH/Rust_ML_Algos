@@ -1,33 +1,85 @@
-# Rust SVM – Multiclass Support Vector Machine mit PyO3
+# Rust SVM – Multiclass Support Vector Machine with PyO3
 
-**Blitzschnelle, eigenständige SVM-Implementierung in Rust –  
-mit Python-Bindings via [PyO3](https://github.com/PyO3/pyo3).**
-
-- **Multiclass:** One-vs-One (OvO), identisch zu scikit-learn
-- **Kernels:** Polynomial, RBF, Linear
-- **Schnell:** Parallele Fits & Predicts dank Rayon
-- **API:** `fit`, `predict` wie bei scikit-learn SVC
-- **Kompatibel:** Für Iris, Wine, Digits, uvm.
-- **100 % Rust!**
+🚀 **Lightning-fast, standalone SVM implementation in Rust – with seamless Python bindings via [PyO3](https://github.com/PyO3/pyo3).**
 
 ---
 
-## Features
+## 📦 Features
 
-- Poly, RBF und Linear-Kernel (alle Parameter wie bei sklearn)
-- Automatische Parallelisierung für viele Klassen und große Daten
-- API für scikit-learn-Fans (Python: fast 1:1)
-- **Kein C/FFI**: Läuft überall, keine Abhängigkeit von libsvm!
-- Leicht zu erweitern um neue Kernel, Optimizer, Features
+* **Multiclass Support:** One-vs-One (OvO) strategy, identical to scikit-learn
+* **Kernel Functions:** Polynomial, RBF, Linear (fully compatible with sklearn parameters)
+* **Performance:** Parallelized fitting and prediction powered by Rayon
+* **API Compatibility:** `fit`, `predict` methods mirror scikit-learn's SVC
+* **Dataset Compatibility:** Easily handles datasets like Iris, Wine, Digits, and more
+* **Pure Rust Implementation:** 100% Rust with no external C/FFI dependencies
 
 ---
 
-## Installation
+## 🛠️ Technology Stack
 
-### 1. Voraussetzungen
+* **Rust:** Safe, performant, and reliable
+* **Rayon:** Efficient parallel computations
+* **PyO3:** Easy-to-use Python interoperability
 
-- **Rust**: Stable Toolchain ([Install-Guide](https://www.rust-lang.org/tools/install))
-- **Python**: >=3.7, [pip](https://pip.pypa.io/en/stable/)
-- **Maturin**:  
+---
+
+## 🏃 Getting Started
+
+### Prerequisites
+
+* **Rust:** Stable Toolchain ([Install Guide](https://www.rust-lang.org/tools/install))
+* **Python:** Version >=3.7 with [pip](https://pip.pypa.io/en/stable/)
+* **Maturin:**
+
   ```bash
   pip install maturin
+  ```
+
+### Installation
+
+```bash
+git clone <your_repo_url>
+cd rust_svm
+maturin develop
+```
+
+### Python Usage Example
+
+```python
+import my_rust_module
+# Load your dataset
+X_train, y_train = ...
+X_test = ...
+
+# Train your model
+svm_model = rust_svm.SVM(kernel='rbf', C=1.0)
+svm_model.fit(X_train, y_train)
+
+# Predict outcomes
+predictions = svm_model.predict(X_test)
+```
+
+---
+
+## 🚧 Roadmap
+
+* [ ] Expand kernel functions
+* [ ] GPU acceleration
+* [ ] Enhanced compatibility with scikit-learn's advanced features
+* [ ] More extensive documentation and examples
+
+---
+
+## 🤝 Contributing
+
+Contributions are warmly welcome! Feel free to open an issue or create a pull request to help enhance compatibility and features.
+
+---
+
+## 📜 License
+
+This project is licensed under the MIT License.
+
+---
+
+Enjoy your Rust-powered SVM journey! 🦀✨
