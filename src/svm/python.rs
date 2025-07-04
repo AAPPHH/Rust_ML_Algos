@@ -1,6 +1,7 @@
 use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
-use crate::svm::svm::SVM;
+use crate::svm::multiclass::SVM;
+
 
 #[pyclass]
 pub struct PySVM {

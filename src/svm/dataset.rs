@@ -22,18 +22,22 @@ impl FlatDataset {
         FlatDataset { data: mat }
     }
 
+    #[inline]
     pub fn n_samples(&self) -> usize {
         self.data.nrows()
     }
 
+    #[inline]
     pub fn n_features(&self) -> usize {
         self.data.ncols()
     }
 
+    #[inline]
     pub fn get_row(&self, i: usize) -> RowRef<'_, f64> {
         self.data.row(i)
     }
     
+    #[inline]
     pub fn as_ref(&self) -> MatRef<'_, f64> {
         self.data.as_ref()
     }

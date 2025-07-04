@@ -1,7 +1,7 @@
 use rayon::prelude::*;
-use crate::svm::svm_kernel::KernelType;
+use crate::svm::kernel::KernelType;
 use crate::svm::dual_svm::DualSVM;
-use crate::svm::flat_dataset::FlatDataset;
+use crate::svm::dataset::FlatDataset;
 use faer::Mat;
 
 pub struct SVM {
@@ -130,14 +130,17 @@ impl SVM {
         if n_samples == 0 {
             return vec![];
         }
+        
         let dataset = FlatDataset::from_nested(x);
         let n_classes = self.classes.len();
+
         let mut votes = vec![vec![0usize; n_classes]; n_samples];
 
         for (class_a, class_b, svm) in &self.classifiers {
             let preds = svm.decision_function_batch(&dataset);
             let idx_a = self.classes.iter().position(|c| c == class_a).unwrap();
             let idx_b = self.classes.iter().position(|c| c == class_b).unwrap();
+            
             for (i, &score) in preds.iter().enumerate() {
                 if score >= 0.0 {
                     votes[i][idx_a] += 1;
@@ -149,7 +152,8 @@ impl SVM {
 
         votes.iter()
             .map(|row| {
-                let (idx, _) = row.iter().enumerate().max_by_key(|&(_, cnt)| cnt).unwrap();
+                let (idx, _) = row.iter().enumerate()
+                    .max_by_key(|&(_, cnt)| cnt).unwrap();
                 self.classes[idx]
             })
             .collect()

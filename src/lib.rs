@@ -8,7 +8,7 @@ use pyo3::prelude::*;
 use crate::logistic_regression::LogisticRegression;
 use crate::knn::KNNClassifier;
 use crate::svm_pegaso::SVMClassifier;
-use crate::svm::svm_py_wrapper::PySVM;
+use crate::svm::python::PySVM;
 
 #[pymodule]
 fn my_rust_module(_py: Python, m: &PyModule) -> PyResult<()> {

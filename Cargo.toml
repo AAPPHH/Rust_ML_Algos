@@ -31,7 +31,7 @@ incremental = false
 
 [profile.release-generic]
 inherits = "release"
-target-cpu = "x86-64-v3"
+target-cpu = "native"
 
 [profile.bench]
 inherits = "release"
