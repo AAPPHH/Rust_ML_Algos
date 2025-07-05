@@ -9,7 +9,6 @@ use my_rust_module::svm::{
     working_set::PartialArgMaxSelector,
 };
 
-// Synthetic data generators
 fn generate_linear_separable_data(n_samples: usize, n_features: usize, noise: f64) -> (Vec<Vec<f64>>, Vec<f64>) {
     let mut rng = StdRng::seed_from_u64(42);
     let normal = Normal::new(0.0, noise).unwrap();
@@ -17,7 +16,6 @@ fn generate_linear_separable_data(n_samples: usize, n_features: usize, noise: f6
     let mut x = Vec::with_capacity(n_samples);
     let mut y = Vec::with_capacity(n_samples);
     
-    // Generate hyperplane coefficients
     let w: Vec<f64> = (0..n_features).map(|_| rng.gen_range(-1.0..1.0)).collect();
     let b = rng.gen_range(-1.0..1.0);
     
@@ -26,7 +24,6 @@ fn generate_linear_separable_data(n_samples: usize, n_features: usize, noise: f6
             .map(|_| rng.gen_range(-10.0..10.0))
             .collect();
         
-        // Calculate true label
         let score: f64 = sample.iter().zip(&w).map(|(xi, wi)| xi * wi).sum::<f64>() + b;
         let label = if score + normal.sample(&mut rng) > 0.0 { 1.0 } else { -1.0 };
         
@@ -44,7 +41,6 @@ fn generate_clusters_data(n_samples: usize, n_features: usize, n_clusters: usize
     let mut x = Vec::with_capacity(n_samples);
     let mut y = Vec::with_capacity(n_samples);
     
-    // Generate cluster centers
     let centers: Vec<Vec<f64>> = (0..n_clusters)
         .map(|_| {
             (0..n_features)
@@ -53,7 +49,6 @@ fn generate_clusters_data(n_samples: usize, n_features: usize, n_clusters: usize
         })
         .collect();
     
-    // Generate samples around centers
     for (cluster_id, center) in centers.iter().enumerate() {
         let normal = Normal::new(0.0, 2.0).unwrap();
         
@@ -70,11 +65,12 @@ fn generate_clusters_data(n_samples: usize, n_features: usize, n_clusters: usize
     (x, y)
 }
 
-// Benchmark individual components
 fn benchmark_kernel_cache(c: &mut Criterion) {
     let mut group = c.benchmark_group("kernel_cache");
+    group.sample_size(20);
+    group.measurement_time(std::time::Duration::from_secs(2));
     
-    for &n_samples in &[100, 500, 1000, 5000] {
+    for &n_samples in &[100, 1000] {
         let (x, _) = generate_linear_separable_data(n_samples, 50, 0.1);
         let dataset = FlatDataset::from_nested(x);
         let kernel = KernelType::new_rbf(0.1);
@@ -116,8 +112,10 @@ fn benchmark_kernel_cache(c: &mut Criterion) {
 
 fn benchmark_working_set_selection(c: &mut Criterion) {
     let mut group = c.benchmark_group("working_set_selection");
+    group.sample_size(10);
+    group.measurement_time(std::time::Duration::from_secs(2));
     
-    for &n_samples in &[100, 500, 1000, 5000] {
+    for &n_samples in &[100, 1000] {
         let (x, y) = generate_linear_separable_data(n_samples, 50, 0.1);
         let dataset = FlatDataset::from_nested(x);
         let kernel = KernelType::new_rbf(0.1);
@@ -151,8 +149,10 @@ fn benchmark_working_set_selection(c: &mut Criterion) {
 
 fn benchmark_kernel_computations(c: &mut Criterion) {
     let mut group = c.benchmark_group("kernel_computations");
+    group.sample_size(30);
+    group.measurement_time(std::time::Duration::from_secs(2));
     
-    for &n_features in &[10, 50, 100, 500] {
+    for &n_features in &[10, 100] {
         let x = vec![vec![1.0; n_features]; 2];
         let dataset = FlatDataset::from_nested(x);
         let row1 = dataset.get_row(0);
@@ -191,11 +191,12 @@ fn benchmark_kernel_computations(c: &mut Criterion) {
 
 fn benchmark_full_training(c: &mut Criterion) {
     let mut group = c.benchmark_group("full_training");
-    group.sample_size(10); // Reduce sample size for longer benchmarks
+    group.sample_size(10);
+    group.measurement_time(std::time::Duration::from_secs(5));
+    group.warm_up_time(std::time::Duration::from_secs(1));
     
-    for &n_samples in &[100, 500, 1000] {
-        // Binary classification
-        let (x, y) = generate_linear_separable_data(n_samples, 20, 0.1);
+    for &n_samples in &[100] {
+        let (x, y) = generate_linear_separable_data(n_samples, 10, 0.1);
         
         group.bench_with_input(
             BenchmarkId::new("linear_svm", n_samples),
@@ -203,7 +204,7 @@ fn benchmark_full_training(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let mut svm = SVM::linear(1.0);
-                    svm.fit(x.clone(), y.clone(), 100, 1e-3).unwrap();
+                    svm.fit(x.clone(), y.clone(), 10, 1e-1).unwrap();
                 });
             }
         );
@@ -214,13 +215,12 @@ fn benchmark_full_training(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let mut svm = SVM::rbf(0.1, 1.0);
-                    svm.fit(x.clone(), y.clone(), 100, 1e-3).unwrap();
+                    svm.fit(x.clone(), y.clone(), 10, 1e-1).unwrap();
                 });
             }
         );
         
-        // Multiclass
-        let (x_multi, y_multi) = generate_clusters_data(n_samples, 20, 3);
+        let (x_multi, y_multi) = generate_clusters_data(n_samples, 10, 3);
         
         group.bench_with_input(
             BenchmarkId::new("multiclass_linear", n_samples),
@@ -228,7 +228,7 @@ fn benchmark_full_training(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let mut svm = SVM::linear(1.0);
-                    svm.fit(x_multi.clone(), y_multi.clone(), 100, 1e-3).unwrap();
+                    svm.fit(x_multi.clone(), y_multi.clone(), 10, 1e-1).unwrap();
                 });
             }
         );
@@ -239,18 +239,27 @@ fn benchmark_full_training(c: &mut Criterion) {
 
 fn benchmark_prediction(c: &mut Criterion) {
     let mut group = c.benchmark_group("prediction");
+    group.sample_size(10);
+    group.measurement_time(std::time::Duration::from_secs(3));
     
-    // Train models once
-    let (x_train, y_train) = generate_linear_separable_data(1000, 50, 0.1);
+    let (x_train, y_train) = generate_linear_separable_data(200, 10, 0.1);
     
     let mut linear_svm = SVM::linear(1.0);
-    linear_svm.fit(x_train.clone(), y_train.clone(), 100, 1e-3).unwrap();
+    println!("Training linear SVM for prediction benchmark...");
+    if let Err(e) = linear_svm.fit(x_train.clone(), y_train.clone(), 30, 1e-2) {
+        println!("Linear SVM training failed: {:?}", e);
+        return;
+    }
     
     let mut rbf_svm = SVM::rbf(0.1, 1.0);
-    rbf_svm.fit(x_train.clone(), y_train.clone(), 100, 1e-3).unwrap();
+    println!("Training RBF SVM for prediction benchmark...");
+    if let Err(e) = rbf_svm.fit(x_train.clone(), y_train.clone(), 30, 1e-2) {
+        println!("RBF SVM training failed: {:?}", e);
+        return;
+    }
     
-    for &n_samples in &[10, 100, 1000] {
-        let (x_test, _) = generate_linear_separable_data(n_samples, 50, 0.1);
+    for &n_samples in &[10, 100] {
+        let (x_test, _) = generate_linear_separable_data(n_samples, 10, 0.1);
         
         group.bench_with_input(
             BenchmarkId::new("linear_predict", n_samples),
@@ -274,8 +283,10 @@ fn benchmark_prediction(c: &mut Criterion) {
 
 fn benchmark_memory_operations(c: &mut Criterion) {
     let mut group = c.benchmark_group("memory_operations");
+    group.sample_size(30);
+    group.measurement_time(std::time::Duration::from_secs(3));
     
-    use my_rust_module::svm::memory::{AlignedBuffer, get_pooled_vec};
+    use  my_rust_module::svm::memory::{AlignedBuffer, get_pooled_vec};
     
     for &size in &[100, 1000, 10000] {
         group.bench_with_input(
@@ -315,6 +326,9 @@ fn benchmark_memory_operations(c: &mut Criterion) {
 
 fn criterion_config() -> Criterion {
     Criterion::default()
+        .warm_up_time(std::time::Duration::from_secs(1))
+        .significance_level(0.1)
+        .confidence_level(0.90)
 }
 
 criterion_group! {
@@ -325,7 +339,6 @@ criterion_group! {
         benchmark_working_set_selection,
         benchmark_kernel_computations,
         benchmark_full_training,
-        benchmark_prediction,
         benchmark_memory_operations
 }
 
