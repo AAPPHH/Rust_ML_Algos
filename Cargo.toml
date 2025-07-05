@@ -26,16 +26,7 @@ lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true
-overflow-checks = false
-incremental = false
 
-[profile.release-generic]
+[profile.release-native]
 inherits = "release"
 target-cpu = "native"
-
-[profile.bench]
-inherits = "release"
-debug = true
-
-[build-dependencies]
-cc = "1.0"
