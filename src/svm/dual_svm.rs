@@ -3,9 +3,9 @@ use crate::svm::cache::{KernelCache, SetAssociativeCache};
 use crate::svm::kernel::KernelType;
 use crate::svm::working_set::{PartialArgMaxSelector, ShrinkingWorkingSet};
 use crate::svm::memory::{AlignedBuffer, get_pooled_vec};
-use faer::Mat;
+use faer::{Mat, MatRef, col::ColRef};
 use rayon::prelude::*;
-
+use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct DualSVM {
     pub alphas: Option<Mat<f64>>,
@@ -45,13 +45,16 @@ impl DualSVM {
         let n = dataset.n_samples();
         
         let mut alphas = vec![0.0; n];
-        let mut grad = vec![-1.0; n];
+        let mut grad = vec![0.0; n];
+        
+        // Initialize gradient
         for i in 0..n {
-            grad[i] *= y[i];
+            grad[i] = -y[i];
         }
+        
         let mut bias = 0.0;
         
-        let cache_size = ((n as f64).sqrt() as usize * 10).max(100).min(8192);
+        let cache_size = self.compute_optimal_cache_size(n);
         let mut kernel_cache = SetAssociativeCache::new(self.kernel.clone(), dataset.clone(), cache_size);
         
         let mut ws_selector = PartialArgMaxSelector::new(n);
@@ -65,8 +68,11 @@ impl DualSVM {
         
         let mut convergence_history = Vec::with_capacity(100);
         let mut last_objective = f64::NEG_INFINITY;
+        let mut stuck_counter = 0;
         
-        while iter < max_iter && (num_changed > 0 || examine_all) {
+        let early_stop = AtomicBool::new(false);
+        
+        while iter < max_iter && (num_changed > 0 || examine_all) && !early_stop.load(Ordering::Relaxed) {
             num_changed = 0;
             
             if !examine_all && iter > 10 && shrink_counter % 10 == 0 {
@@ -82,9 +88,10 @@ impl DualSVM {
                     tol,
                 );
                 
-                if active_set.len() < n / 20 {
+                if active_set.len() < n / 20 || stuck_counter > 5 {
                     active_set = (0..n).collect();
                     examine_all = true;
+                    stuck_counter = 0;
                     continue;
                 }
             }
@@ -95,8 +102,14 @@ impl DualSVM {
                 active_set.clone()
             };
             
+            let max_inner = if examine_all { 
+                1 
+            } else { 
+                (indices_to_check.len() as f64 * 0.1).max(10.0).min(1000.0) as usize
+            };
+            
             let mut inner_iter = 0;
-            let max_inner = if examine_all { 1 } else { indices_to_check.len().min(1000) };
+            let mut local_changes = 0;
             
             while inner_iter < max_inner {
                 let ws_result = ws_selector.select_working_set_optimized(
@@ -117,6 +130,11 @@ impl DualSVM {
                         let i = indices_to_check[ii];
                         let j = indices_to_check[jj];
                         
+                        if inner_iter + 1 < max_inner {
+                            kernel_cache.prefetch_row(i);
+                            kernel_cache.prefetch_row(j);
+                        }
+                        
                         if self.take_step_optimized(
                             i, j, 
                             &mut alphas, 
@@ -125,7 +143,7 @@ impl DualSVM {
                             &y,
                             &mut kernel_cache,
                         ) {
-                            num_changed += 1;
+                            local_changes += 1;
                         }
                     }
                     None => break,
@@ -134,15 +152,29 @@ impl DualSVM {
                 inner_iter += 1;
             }
             
+            num_changed += local_changes;
+            
             if iter % 10 == 0 {
-                let objective = self.compute_objective(&alphas, &grad);
-                convergence_history.push(objective - last_objective);
+                let objective = self.compute_objective_fast(&alphas, &grad);
+                let improvement = objective - last_objective;
+                convergence_history.push(improvement);
+                
+                if improvement < tol * 0.01 {
+                    stuck_counter += 1;
+                } else {
+                    stuck_counter = 0;
+                }
+                
                 last_objective = objective;
                 
                 if convergence_history.len() > 5 {
-                    let recent_avg = convergence_history.iter().rev().take(5).sum::<f64>() / 5.0;
-                    if recent_avg.abs() < tol * 0.1 {
-                        break;
+                    let recent_avg = convergence_history.iter()
+                        .rev()
+                        .take(5)
+                        .sum::<f64>() / 5.0;
+                    
+                    if recent_avg.abs() < tol * 0.01 {
+                        early_stop.store(true, Ordering::Relaxed);
                     }
                 }
             }
@@ -156,12 +188,24 @@ impl DualSVM {
             iter += 1;
             shrink_counter += 1;
             
-            if iter > 10 && num_changed == 0 && !examine_all {
+            if iter > 50 && num_changed == 0 && !examine_all && stuck_counter > 3 {
                 break;
             }
         }
         
         self.extract_support_vectors_parallel(alphas, y, dataset, bias);
+    }
+
+    fn compute_optimal_cache_size(&self, n: usize) -> usize {
+
+        let available_mb = 1024;
+        
+        let entry_size = 16;
+        let max_entries = (available_mb * 1024 * 1024) / entry_size;
+        
+        let baseline = ((n as f64).sqrt() * 20.0) as usize;
+        
+        baseline.min(max_entries).max(1024)
     }
 
     #[inline(always)]
@@ -181,11 +225,11 @@ impl DualSVM {
         
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         unsafe {
-            use std::arch::x86_64::_mm_prefetch;
-            _mm_prefetch(alphas.as_ptr().add(i) as *const i8, 0);
-            _mm_prefetch(alphas.as_ptr().add(j) as *const i8, 0);
-            _mm_prefetch(grad.as_ptr().add(i) as *const i8, 0);
-            _mm_prefetch(grad.as_ptr().add(j) as *const i8, 0);
+            use std::arch::x86_64::{_mm_prefetch, _MM_HINT_T0};
+            _mm_prefetch(alphas.as_ptr().add(i) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(alphas.as_ptr().add(j) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(grad.as_ptr().add(i) as *const i8, _MM_HINT_T0);
+            _mm_prefetch(grad.as_ptr().add(j) as *const i8, _MM_HINT_T0);
         }
         
         let yi = unsafe { *y.get_unchecked(i) };
@@ -211,7 +255,7 @@ impl DualSVM {
         let kij = kernel_cache.get(i, j);
         let eta = kii + kjj - 2.0 * kij;
         
-        if eta <= 0.0 {
+        if eta <= 1e-12 {
             return false;
         }
         
@@ -249,7 +293,7 @@ impl DualSVM {
         let yi_delta_ai = yi * delta_ai;
         let yj_delta_aj = yj * delta_aj;
         
-        self.update_gradient_vectorized(
+        self.update_gradient_vectorized_optimized(
             grad,
             kernel_cache,
             i, j,
@@ -261,7 +305,7 @@ impl DualSVM {
     }
 
     #[inline(always)]
-    fn update_gradient_vectorized<C: KernelCache>(
+    fn update_gradient_vectorized_optimized<C: KernelCache>(
         &self,
         grad: &mut [f64],
         kernel_cache: &mut C,
@@ -274,9 +318,9 @@ impl DualSVM {
         
         #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
         {
-            if n > 1000 && is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
+            if n > 500 && is_x86_feature_detected!("avx2") && is_x86_feature_detected!("fma") {
                 unsafe {
-                    self.update_gradient_avx2_fma(
+                    self.update_gradient_avx2_fma_optimized(
                         grad,
                         kernel_cache,
                         i, j,
@@ -288,7 +332,7 @@ impl DualSVM {
             }
         }
         
-        const BATCH_SIZE: usize = 256;
+        const BATCH_SIZE: usize = 512;
         let mut buffer = AlignedBuffer::new(2 * BATCH_SIZE);
         
         for batch_start in (0..n).step_by(BATCH_SIZE) {
@@ -298,8 +342,15 @@ impl DualSVM {
             buffer.resize(2 * batch_len);
             let (ki_batch, kj_batch) = buffer.split_at_mut(batch_len);
             
-            kernel_cache.get_row_batch(i, batch_start..batch_end, ki_batch);
-            kernel_cache.get_row_batch(j, batch_start..batch_end, kj_batch);
+            if batch_len > 64 {
+                kernel_cache.prefetch_row(i);
+                kernel_cache.get_row_batch(i, batch_start..batch_end, ki_batch);
+                kernel_cache.prefetch_row(j);
+                kernel_cache.get_row_batch(j, batch_start..batch_end, kj_batch);
+            } else {
+                kernel_cache.get_row_batch(i, batch_start..batch_end, ki_batch);
+                kernel_cache.get_row_batch(j, batch_start..batch_end, kj_batch);
+            }
             
             for (idx, k) in (batch_start..batch_end).enumerate() {
                 unsafe {
@@ -313,7 +364,7 @@ impl DualSVM {
 
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     #[target_feature(enable = "avx2", enable = "fma")]
-    unsafe fn update_gradient_avx2_fma<C: KernelCache>(
+    unsafe fn update_gradient_avx2_fma_optimized<C: KernelCache>(
         &self,
         grad: &mut [f64],
         kernel_cache: &mut C,
@@ -328,7 +379,7 @@ impl DualSVM {
         let yj_delta_vec = _mm256_set1_pd(yj_delta_aj);
         
         let n = grad.len();
-        const BATCH_SIZE: usize = 32;
+        const BATCH_SIZE: usize = 64;
         let mut buffer = AlignedBuffer::new(2 * BATCH_SIZE);
         
         for batch_start in (0..n).step_by(BATCH_SIZE) {
@@ -336,7 +387,7 @@ impl DualSVM {
             let batch_len = batch_end - batch_start;
             
             if batch_end < n {
-                _mm_prefetch(grad.as_ptr().add(batch_end) as *const i8, 1);
+                _mm_prefetch(grad.as_ptr().add(batch_end) as *const i8, _MM_HINT_T1);
             }
             
             buffer.resize(2 * batch_len);
@@ -346,27 +397,43 @@ impl DualSVM {
             kernel_cache.get_row_batch(j, batch_start..batch_end, kj_vals);
             
             let mut k = 0;
-            while k + 8 <= batch_len {
-                let grad1 = _mm256_loadu_pd(grad.as_ptr().add(batch_start + k));
-                let grad2 = _mm256_loadu_pd(grad.as_ptr().add(batch_start + k + 4));
+            
+            while k + 16 <= batch_len {
+                let grad0 = _mm256_loadu_pd(grad.as_ptr().add(batch_start + k));
+                let grad1 = _mm256_loadu_pd(grad.as_ptr().add(batch_start + k + 4));
+                let grad2 = _mm256_loadu_pd(grad.as_ptr().add(batch_start + k + 8));
+                let grad3 = _mm256_loadu_pd(grad.as_ptr().add(batch_start + k + 12));
                 
-                let ki1 = _mm256_loadu_pd(ki_vals.as_ptr().add(k));
-                let ki2 = _mm256_loadu_pd(ki_vals.as_ptr().add(k + 4));
-                let kj1 = _mm256_loadu_pd(kj_vals.as_ptr().add(k));
-                let kj2 = _mm256_loadu_pd(kj_vals.as_ptr().add(k + 4));
+                let ki0 = _mm256_loadu_pd(ki_vals.as_ptr().add(k));
+                let ki1 = _mm256_loadu_pd(ki_vals.as_ptr().add(k + 4));
+                let ki2 = _mm256_loadu_pd(ki_vals.as_ptr().add(k + 8));
+                let ki3 = _mm256_loadu_pd(ki_vals.as_ptr().add(k + 12));
                 
+                let kj0 = _mm256_loadu_pd(kj_vals.as_ptr().add(k));
+                let kj1 = _mm256_loadu_pd(kj_vals.as_ptr().add(k + 4));
+                let kj2 = _mm256_loadu_pd(kj_vals.as_ptr().add(k + 8));
+                let kj3 = _mm256_loadu_pd(kj_vals.as_ptr().add(k + 12));
+                
+                let update0 = _mm256_fmadd_pd(yi_delta_vec, ki0, 
+                             _mm256_mul_pd(yj_delta_vec, kj0));
                 let update1 = _mm256_fmadd_pd(yi_delta_vec, ki1, 
                              _mm256_mul_pd(yj_delta_vec, kj1));
                 let update2 = _mm256_fmadd_pd(yi_delta_vec, ki2, 
                              _mm256_mul_pd(yj_delta_vec, kj2));
+                let update3 = _mm256_fmadd_pd(yi_delta_vec, ki3, 
+                             _mm256_mul_pd(yj_delta_vec, kj3));
                 
+                let new_grad0 = _mm256_add_pd(grad0, update0);
                 let new_grad1 = _mm256_add_pd(grad1, update1);
                 let new_grad2 = _mm256_add_pd(grad2, update2);
+                let new_grad3 = _mm256_add_pd(grad3, update3);
 
-                _mm256_storeu_pd(grad.as_mut_ptr().add(batch_start + k), new_grad1);
-                _mm256_storeu_pd(grad.as_mut_ptr().add(batch_start + k + 4), new_grad2);
+                _mm256_storeu_pd(grad.as_mut_ptr().add(batch_start + k), new_grad0);
+                _mm256_storeu_pd(grad.as_mut_ptr().add(batch_start + k + 4), new_grad1);
+                _mm256_storeu_pd(grad.as_mut_ptr().add(batch_start + k + 8), new_grad2);
+                _mm256_storeu_pd(grad.as_mut_ptr().add(batch_start + k + 12), new_grad3);
                 
-                k += 8;
+                k += 16;
             }
             
             while k < batch_len {
@@ -378,14 +445,22 @@ impl DualSVM {
         }
     }
     
-    fn compute_objective(&self, alphas: &[f64], grad: &[f64]) -> f64 {
-        alphas.iter().zip(grad.iter())
-            .map(|(a, g)| a * g)
-            .sum::<f64>() * 0.5
-            - alphas.iter().sum::<f64>()
+    #[inline]
+    fn compute_objective_fast(&self, alphas: &[f64], grad: &[f64]) -> f64 {
+        let mut sum = 0.0;
+        let mut c = 0.0;
+        
+        for i in 0..alphas.len() {
+            let y = alphas[i] * grad[i] * 0.5 - alphas[i] - c;
+            let t = sum + y;
+            c = (t - sum) - y;
+            sum = t;
+        }
+        
+        sum
     }
     
-        fn extract_support_vectors_parallel(
+    fn extract_support_vectors_parallel(
         &mut self,
         alphas: Vec<f64>,
         y: Vec<f64>,
@@ -402,38 +477,41 @@ impl DualSVM {
             return;
         }
         
-        let mut sv_data = Mat::zeros(n_sv, dataset.n_features());
-        let mut sv_labels = Mat::zeros(n_sv, 1);
-        let mut sv_alphas = Mat::zeros(n_sv, 1);
+        let n_features = dataset.n_features();
         
-        if n_sv > 100 && dataset.n_features() > 100 {
-            use std::sync::atomic::{AtomicPtr, Ordering};
-            use std::ptr;
-            
-            let sv_data_ptr = AtomicPtr::new(sv_data.as_ptr() as *mut f64);
-            let data_ptr = AtomicPtr::new(dataset.data.as_ptr() as *mut f64);
-            let n_features = dataset.n_features();
-            
-            sv_indices.par_iter().enumerate().for_each(|(idx, &i)| {
-                unsafe {
-                    let src_offset = i * n_features;
-                    let dst_offset = idx * n_features;
-                    let src_ptr = data_ptr.load(Ordering::Relaxed).add(src_offset);
-                    let dst_ptr = sv_data_ptr.load(Ordering::Relaxed).add(dst_offset);
-                    ptr::copy_nonoverlapping(src_ptr, dst_ptr, n_features);
+        let mut sv_data = Mat::<f64>::zeros(n_sv, n_features);
+        let mut sv_labels = Mat::<f64>::zeros(n_sv, 1);
+        let mut sv_alphas = Mat::<f64>::zeros(n_sv, 1);
+        
+        if n_sv > 100 && n_features > 100 {
+            let rows_data: Vec<(usize, Vec<f64>)> = sv_indices
+                .par_iter()
+                .enumerate()
+                .map(|(idx, &i)| {
+                    let src_row = dataset.data.row(i);
+                    let row_vec: Vec<f64> = (0..n_features).map(|j| src_row[j]).collect();
+                    (idx, row_vec)
+                })
+                .collect();
+
+            for (idx, row_data) in rows_data {
+                for (j, &val) in row_data.iter().enumerate() {
+                    sv_data[(idx, j)] = val;
                 }
-            });
+            }
+            
+            for (idx, &i) in sv_indices.iter().enumerate() {
+                sv_labels[(idx, 0)] = y[i];
+                sv_alphas[(idx, 0)] = alphas[i];
+            }
         } else {
             for (idx, &i) in sv_indices.iter().enumerate() {
                 let src_row = dataset.data.row(i);
                 let mut dst_row = sv_data.row_mut(idx);
                 dst_row.copy_from(src_row);
+                sv_labels[(idx, 0)] = y[i];
+                sv_alphas[(idx, 0)] = alphas[i];
             }
-        }
-
-        for (idx, &i) in sv_indices.iter().enumerate() {
-            sv_labels[(idx, 0)] = y[i];
-            sv_alphas[(idx, 0)] = alphas[i];
         }
 
         self.support_vectors = Some(FlatDataset { data: sv_data });
@@ -449,12 +527,12 @@ impl DualSVM {
         let bias = self.bias;
         
         match &self.kernel {
-            KernelType::Linear => self.decision_function_linear(dataset, sv, sl, al, bias),
-            _ => self.decision_function_nonlinear(dataset, sv, sl, al, bias),
+            KernelType::Linear => self.decision_function_linear_optimized(dataset, sv, sl, al, bias),
+            _ => self.decision_function_nonlinear_optimized(dataset, sv, sl, al, bias),
         }
     }
     
-    fn decision_function_linear(
+    fn decision_function_linear_optimized(
         &self,
         dataset: &FlatDataset,
         sv: &FlatDataset,
@@ -466,13 +544,14 @@ impl DualSVM {
         let n_sv = sv.n_samples();
         let n_samples = dataset.n_samples();
 
-        let w: Vec<f64> = if n_sv > 100 {
+        let mut w = vec![0.0; n_features];
+        
+        if n_sv > 50 {
             use std::sync::Mutex;
             let w_mutex = Mutex::new(vec![0.0; n_features]);
             
-            (0..n_sv).into_par_iter().chunks(64).for_each(|chunk| {
-                let mut local_w = get_pooled_vec(n_features);
-                local_w.resize(n_features, 0.0);
+            (0..n_sv).into_par_iter().chunks(128).for_each(|chunk| {
+                let mut local_w = vec![0.0; n_features];
                 
                 for i in chunk {
                     let alpha_y = al[(i, 0)] * sl[(i, 0)];
@@ -489,9 +568,8 @@ impl DualSVM {
                 }
             });
             
-            w_mutex.into_inner().unwrap()
+            w = w_mutex.into_inner().unwrap();
         } else {
-            let mut w = vec![0.0; n_features];
             for i in 0..n_sv {
                 let alpha_y = al[(i, 0)] * sl[(i, 0)];
                 let sv_row = sv.data.row(i);
@@ -500,39 +578,45 @@ impl DualSVM {
                     w[j] += alpha_y * sv_row[j];
                 }
             }
-            w
-        };
+        }
         
-        if n_samples > 1000 {
+        if n_samples > 500 {
             (0..n_samples).into_par_iter()
                 .map(|i| {
                     let row = dataset.get_row(i);
-                    let mut sum = 0.0;
+                    let mut sum = bias;
                     
-                    for j in 0..n_features {
+                    let mut j = 0;
+                    while j + 4 <= n_features {
+                        sum += row[j] * w[j] + row[j+1] * w[j+1] +
+                               row[j+2] * w[j+2] + row[j+3] * w[j+3];
+                        j += 4;
+                    }
+                    while j < n_features {
                         sum += row[j] * w[j];
+                        j += 1;
                     }
                     
-                    sum + bias
+                    sum
                 })
                 .collect()
         } else {
             let mut result = vec![0.0; n_samples];
             for i in 0..n_samples {
                 let row = dataset.get_row(i);
-                let mut sum = 0.0;
+                let mut sum = bias;
                 
                 for j in 0..n_features {
                     sum += row[j] * w[j];
                 }
                 
-                result[i] = sum + bias;
+                result[i] = sum;
             }
             result
         }
     }
     
-    fn decision_function_nonlinear(
+    fn decision_function_nonlinear_optimized(
         &self,
         dataset: &FlatDataset,
         sv: &FlatDataset,
@@ -547,20 +631,34 @@ impl DualSVM {
             .map(|i| al[(i, 0)] * sl[(i, 0)])
             .collect();
         
-        if n > 100 {
+        if n > 200 {
+            let chunk_size = (n / rayon::current_num_threads()).max(16);
+            
             (0..n).into_par_iter()
-                .chunks(32)
+                .chunks(chunk_size)
                 .flat_map(|chunk| {
                     chunk.into_iter().map(|i| {
                         let xi = dataset.get_row(i);
-                        let mut sum = 0.0;
+                        let mut sum = bias;
                         
-                        for j in 0..n_sv {
-                            let svj = sv.get_row(j);
-                            sum += coeffs[j] * self.kernel.compute_pair(&xi, &svj);
+                        let mut j = 0;
+                        while j + 2 <= n_sv {
+                            let svj0 = sv.get_row(j);
+                            let svj1 = sv.get_row(j + 1);
+                            
+                            sum += coeffs[j] * self.kernel.compute_pair(&xi, &svj0);
+                            sum += coeffs[j + 1] * self.kernel.compute_pair(&xi, &svj1);
+                            
+                            j += 2;
                         }
                         
-                        sum + bias
+                        while j < n_sv {
+                            let svj = sv.get_row(j);
+                            sum += coeffs[j] * self.kernel.compute_pair(&xi, &svj);
+                            j += 1;
+                        }
+                        
+                        sum
                     }).collect::<Vec<_>>()
                 })
                 .collect()
@@ -569,14 +667,14 @@ impl DualSVM {
             
             for i in 0..n {
                 let xi = dataset.get_row(i);
-                let mut sum = 0.0;
+                let mut sum = bias;
                 
                 for j in 0..n_sv {
                     let svj = sv.get_row(j);
                     sum += coeffs[j] * self.kernel.compute_pair(&xi, &svj);
                 }
                 
-                result[i] = sum + bias;
+                result[i] = sum;
             }
             
             result

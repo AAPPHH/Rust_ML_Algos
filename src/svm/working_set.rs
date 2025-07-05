@@ -13,24 +13,31 @@ pub struct PartialArgMaxSelector {
     k_size: usize,
     shrink_threshold: f64,
     iteration_count: usize,
+    sorted_indices: Vec<usize>,
+    last_violation_sum: f64,
 }
 
 impl PartialArgMaxSelector {
     pub fn new(n: usize) -> Self {
-        let k_size = (n as f64).sqrt() as usize;
+        let k_size = ((n as f64).sqrt() as usize).max(20).min(200);
         
         let mut grad_cache = AlignedVec::with_capacity(n);
         grad_cache.resize(n, 0.0);
         
+        let mut violations = AlignedVec::with_capacity(n);
+        violations.resize(n, 0.0);
+        
         Self {
             n,
-            violations: AlignedVec::with_capacity(n),
+            violations,
             indices: Vec::with_capacity(n),
             top_k_buffer: Vec::with_capacity(k_size * 2),
             grad_cache,
-            k_size: k_size.max(10).min(100),
+            k_size,
             shrink_threshold: 0.1,
             iteration_count: 0,
+            sorted_indices: (0..n).collect(),
+            last_violation_sum: 0.0,
         }
     }
     
@@ -52,10 +59,7 @@ impl PartialArgMaxSelector {
             self.grad_cache[i] = grad[i];
         }
         
-        self.violations.clear();
-        self.indices.clear();
-        
-        let mut heap = self.find_top_k_violations(alphas, y, c, active_indices, TOL);
+        let heap = self.find_top_k_violations_fast(alphas, y, c, active_indices, TOL);
         
         if heap.is_empty() {
             return None;
@@ -64,11 +68,18 @@ impl PartialArgMaxSelector {
         let mut best_pair = None;
         let mut best_gain = -1.0;
         
-        for &(i, i_violation) in heap.iter().take(self.k_size) {
+        let search_limit = (self.k_size as f64 * 1.5) as usize;
+        
+        for (idx, &(i, i_violation)) in heap.iter().take(search_limit).enumerate() {
             let gi = self.grad_cache[i];
             let kii = kernel_cache.get_diagonal(i);
             
-            if let Some((j, gain)) = self.find_best_partner(
+            if idx + 1 < heap.len() {
+                let next_i = heap[idx + 1].0;
+                kernel_cache.prefetch_row(next_i);
+            }
+            
+            if let Some((j, gain)) = self.find_best_partner_fast(
                 i, gi, kii, alphas, y, c, kernel_cache, &heap, TOL
             ) {
                 if gain > best_gain {
@@ -78,8 +89,8 @@ impl PartialArgMaxSelector {
             }
         }
         
-        if self.iteration_count % 50 == 0 {
-            self.adapt_parameters(best_gain);
+        if self.iteration_count % 20 == 0 {
+            self.adapt_parameters_smart(best_gain, heap.len());
         }
         
         if let Some((i, j, violation)) = best_pair {
@@ -92,7 +103,7 @@ impl PartialArgMaxSelector {
     }
     
     #[inline]
-    fn find_top_k_violations(
+    fn find_top_k_violations_fast(
         &mut self,
         alphas: &[f64],
         y: &[f64],
@@ -102,52 +113,62 @@ impl PartialArgMaxSelector {
     ) -> Vec<(usize, f64)> {
         self.top_k_buffer.clear();
         
-        if active_indices.len() > 1000 {
+        if active_indices.len() > 500 {
             let violations: Vec<(usize, f64)> = active_indices
                 .par_iter()
                 .filter_map(|&i| {
                     let ai = unsafe { *alphas.get_unchecked(i) };
-                    let yi_gi = unsafe { y.get_unchecked(i) * self.grad_cache.get_unchecked(i) };
+                    let yi = unsafe { *y.get_unchecked(i) };
+                    let gi = unsafe { *self.grad_cache.get_unchecked(i) };
+                    let yi_gi = yi * gi;
                     
-                    let at_lower = ai < c - tol;
-                    let at_upper = ai > tol;
-                    let violates_lower = at_lower && yi_gi < -tol;
-                    let violates_upper = at_upper && yi_gi > tol;
-                    
-                    if violates_lower || violates_upper {
-                        Some((i, yi_gi.abs()))
+                    let violation = if ai < c - tol && yi_gi < -tol {
+                        Some(-yi_gi)
+                    } else if ai > tol && yi_gi > tol {
+                        Some(yi_gi)
                     } else {
                         None
-                    }
+                    };
+                    
+                    violation.map(|v| (i, v))
                 })
                 .collect();
             
             let mut sorted = violations;
             let k = self.k_size.min(sorted.len());
+            
             if k > 0 {
                 sorted.select_nth_unstable_by(k.saturating_sub(1), |a, b| {
                     b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
                 });
-                
                 sorted.truncate(k);
                 sorted.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal));
             }
+            
             sorted
         } else {
-
             let mut violations = Vec::new();
             
-            for &i in active_indices {
+            for &i in &self.sorted_indices {
+                if !active_indices.contains(&i) {
+                    continue;
+                }
+                
                 let ai = unsafe { *alphas.get_unchecked(i) };
-                let yi_gi = unsafe { y.get_unchecked(i) * self.grad_cache.get_unchecked(i) };
+                let yi = unsafe { *y.get_unchecked(i) };
+                let gi = unsafe { *self.grad_cache.get_unchecked(i) };
+                let yi_gi = yi * gi;
                 
-                let at_lower = ai < c - tol;
-                let at_upper = ai > tol;
-                let violates_lower = at_lower && yi_gi < -tol;
-                let violates_upper = at_upper && yi_gi > tol;
+                let violation = if ai < c - tol && yi_gi < -tol {
+                    Some(-yi_gi)
+                } else if ai > tol && yi_gi > tol {
+                    Some(yi_gi)
+                } else {
+                    None
+                };
                 
-                if violates_lower || violates_upper {
-                    violations.push((i, yi_gi.abs()));
+                if let Some(v) = violation {
+                    violations.push((i, v));
                 }
             }
             
@@ -158,7 +179,7 @@ impl PartialArgMaxSelector {
     }
     
     #[inline]
-    fn find_best_partner<C: KernelCache>(
+    fn find_best_partner_fast<C: KernelCache>(
         &mut self,
         i: usize,
         gi: f64,
@@ -171,35 +192,44 @@ impl PartialArgMaxSelector {
         tol: f64,
     ) -> Option<(usize, f64)> {
         let mut best_j = None;
-        let mut max_gain = -1.0;
+        let mut max_gain = 0.0;
         
-        for &(j, _) in candidates.iter().take(self.k_size * 2) {
+        let candidate_limit = (self.k_size * 3).min(candidates.len());
+        
+        for (idx, &(j, _)) in candidates.iter().take(candidate_limit).enumerate() {
             if j == i { continue; }
             
             let aj = alphas[j];
             let yj = y[j];
+            let gj = self.grad_cache[j];
+            let yj_gj = yj * gj;
             
-            let at_lower = aj < c - tol;
-            let at_upper = aj > tol;
-            let yj_gj = yj * self.grad_cache[j];
+            let feasible = (aj < c - tol && yj_gj < -tol) || 
+                          (aj > tol && yj_gj > tol);
             
-            if !((at_lower && yj_gj < -tol) || (at_upper && yj_gj > tol)) {
+            if !feasible {
                 continue;
             }
             
-            let gj = self.grad_cache[j];
             let diff = gi - gj;
+            let diff_sq = diff * diff;
             
-            if diff * diff <= max_gain * 1e-8 {
+            if diff_sq <= max_gain * 1.001 {
                 continue;
+            }
+            
+            if idx + 1 < candidate_limit {
+                let next_j = candidates[idx + 1].0;
+                let (_, set_idx) = kernel_cache.hash_key(i, next_j);
+                kernel_cache.prefetch_cache_line(set_idx);
             }
             
             let kjj = kernel_cache.get_diagonal(j);
             let kij = kernel_cache.get(i, j);
             let eta = kii + kjj - 2.0 * kij;
             
-            if eta > 1e-8 {
-                let gain = diff * diff / eta;
+            if eta > 1e-12 {
+                let gain = diff_sq / eta;
                 if gain > max_gain {
                     max_gain = gain;
                     best_j = Some(j);
@@ -210,13 +240,38 @@ impl PartialArgMaxSelector {
         best_j.map(|j| (j, max_gain))
     }
     
-    fn adapt_parameters(&mut self, current_gain: f64) {
-        if current_gain < self.shrink_threshold {
-            self.k_size = (self.k_size * 3 / 2).min(100);
-            self.shrink_threshold *= 0.9;
-        } else if current_gain > self.shrink_threshold * 10.0 {
-            self.k_size = (self.k_size * 2 / 3).max(10);
+    fn adapt_parameters_smart(&mut self, current_gain: f64, num_violations: usize) {
+        let violation_sum = self.violations.as_slice().iter().sum::<f64>();
+        let violation_change = (violation_sum - self.last_violation_sum).abs();
+        self.last_violation_sum = violation_sum;
+        
+        if violation_change < 0.01 * violation_sum {
+            self.k_size = (self.k_size * 5 / 4).min(200).min(num_violations);
+        } else if current_gain < self.shrink_threshold {
+            self.k_size = (self.k_size * 3 / 2).min(200);
+            self.shrink_threshold *= 0.95;
+        } else if current_gain > self.shrink_threshold * 20.0 {
+            self.k_size = (self.k_size * 3 / 4).max(20);
         }
+        
+        if self.iteration_count % 100 == 0 {
+            self.update_sorted_indices();
+        }
+    }
+    
+    fn update_sorted_indices(&mut self) {
+        let mut violation_counts: Vec<(usize, f64)> = self.sorted_indices
+            .iter()
+            .map(|&i| (i, self.violations[i]))
+            .collect();
+            
+        violation_counts.sort_unstable_by(|a, b| 
+            b.1.partial_cmp(&a.1).unwrap_or(Ordering::Equal)
+        );
+        
+        self.sorted_indices = violation_counts.into_iter()
+            .map(|(i, _)| i)
+            .collect();
     }
 }
 
@@ -225,6 +280,8 @@ pub struct ShrinkingWorkingSet {
     violations: AlignedVec<f64>,
     sorted_indices: Vec<usize>,
     shrink_counter: usize,
+    last_active_count: usize,
+    consecutive_no_change: usize,
 }
 
 impl ShrinkingWorkingSet {
@@ -237,6 +294,8 @@ impl ShrinkingWorkingSet {
             violations,
             sorted_indices: Vec::with_capacity(n),
             shrink_counter: 0,
+            last_active_count: n,
+            consecutive_no_change: 0,
         }
     }
     
@@ -251,70 +310,21 @@ impl ShrinkingWorkingSet {
         let n = alphas_mat.nrows();
         self.shrink_counter += 1;
         
-        let shrink_tol = if self.shrink_counter > 100 {
-            tol * 10.0
-        } else if self.shrink_counter > 50 {
-            tol * 5.0
-        } else {
-            tol * 2.0
-        };
+        let shrink_tol = self.compute_adaptive_tolerance(tol);
         
         if n > 1000 {
-            let active_flags: Vec<(usize, bool, f64)> = (0..n)
-                .into_par_iter()
-                .map(|i| {
-                    let ai = unsafe { *alphas_mat.get_unchecked(i, 0) };
-                    let yi = unsafe { *y_mat.get_unchecked(i, 0) };
-                    let gi = unsafe { *grad_mat.get_unchecked(i, 0) };
-                    let yi_gi = yi * gi;
-                    
-                    let at_bound_zero = ai <= 1e-8;
-                    let at_bound_c = ai >= c - 1e-8;
-                    let should_shrink = (at_bound_zero && yi_gi >= 1.0 - shrink_tol) || 
-                                       (at_bound_c && yi_gi <= -1.0 + shrink_tol);
-                    
-                    (i, !should_shrink, if should_shrink { 0.0 } else { yi_gi.abs() })
-                })
-                .collect();
-            
-            self.sorted_indices.clear();
-            for (i, active, violation) in active_flags {
-                self.active_mask[i] = active;
-                self.violations[i] = violation;
-                if active {
-                    self.sorted_indices.push(i);
-                }
-            }
+            self.parallel_shrinking_check(alphas_mat, y_mat, grad_mat, c, shrink_tol);
         } else {
-            let mut num_active = 0;
-            
-            for i in 0..n {
-                let ai = unsafe { *alphas_mat.get_unchecked(i, 0) };
-                let yi = unsafe { *y_mat.get_unchecked(i, 0) };
-                let gi = unsafe { *grad_mat.get_unchecked(i, 0) };
-                let yi_gi = yi * gi;
-                
-                let at_bound_zero = ai <= 1e-8;
-                let at_bound_c = ai >= c - 1e-8;
-                let should_shrink = (at_bound_zero && yi_gi >= 1.0 - shrink_tol) || 
-                                   (at_bound_c && yi_gi <= -1.0 + shrink_tol);
-                
-                self.active_mask[i] = !should_shrink;
-                if !should_shrink {
-                    self.violations[i] = yi_gi.abs();
-                    num_active += 1;
-                } else {
-                    self.violations[i] = 0.0;
-                }
-            }
-
-            self.sorted_indices.clear();
-            self.sorted_indices.reserve(num_active);
-            
-            for i in 0..n {
-                if self.active_mask[i] {
-                    self.sorted_indices.push(i);
-                }
+            self.sequential_shrinking_check(alphas_mat, y_mat, grad_mat, c, shrink_tol);
+        }
+        
+        self.sorted_indices.clear();
+        let mut active_count = 0;
+        
+        for i in 0..n {
+            if self.active_mask[i] {
+                self.sorted_indices.push(i);
+                active_count += 1;
             }
         }
         
@@ -323,10 +333,115 @@ impl ShrinkingWorkingSet {
                 .unwrap_or(Ordering::Equal)
         });
         
-        if self.sorted_indices.len() > 1000 {
-            self.sorted_indices.truncate(1000);
+        let max_active = if self.shrink_counter < 10 {
+            n
+        } else if self.shrink_counter < 50 {
+            (n * 3 / 4).max(1000)
+        } else {
+            (n / 2).max(500)
+        };
+        
+        if self.sorted_indices.len() > max_active {
+            self.sorted_indices.truncate(max_active);
+        }
+        
+        if active_count == self.last_active_count {
+            self.consecutive_no_change += 1;
+        } else {
+            self.consecutive_no_change = 0;
+        }
+        self.last_active_count = active_count;
+        
+        // Reset if stuck
+        if self.consecutive_no_change > 10 {
+            self.reset_active_set(n);
         }
         
         self.sorted_indices.clone()
+    }
+    
+    fn compute_adaptive_tolerance(&self, base_tol: f64) -> f64 {
+        if self.shrink_counter > 100 {
+            base_tol * 20.0
+        } else if self.shrink_counter > 50 {
+            base_tol * 10.0
+        } else if self.shrink_counter > 20 {
+            base_tol * 5.0
+        } else {
+            base_tol * 2.0
+        }
+    }
+    
+    fn parallel_shrinking_check(
+        &mut self,
+        alphas_mat: MatRef<f64>,
+        y_mat: MatRef<f64>,
+        grad_mat: MatRef<f64>,
+        c: f64,
+        shrink_tol: f64,
+    ) {
+        let n = alphas_mat.nrows();
+        
+        let results: Vec<(bool, f64)> = (0..n)
+            .into_par_iter()
+            .map(|i| {
+                let ai = unsafe { *alphas_mat.get_unchecked(i, 0) };
+                let yi = unsafe { *y_mat.get_unchecked(i, 0) };
+                let gi = unsafe { *grad_mat.get_unchecked(i, 0) };
+                let yi_gi = yi * gi;
+                
+                let at_lower = ai <= 1e-8;
+                let at_upper = ai >= c - 1e-8;
+                
+                let should_shrink = (at_lower && yi_gi >= 1.0 - shrink_tol) || 
+                                   (at_upper && yi_gi <= -1.0 + shrink_tol);
+                
+                let violation = if should_shrink { 
+                    0.0 
+                } else { 
+                    yi_gi.abs() 
+                };
+                
+                (!should_shrink, violation)
+            })
+            .collect();
+        
+        for (i, (active, violation)) in results.into_iter().enumerate() {
+            self.active_mask[i] = active;
+            self.violations[i] = violation;
+        }
+    }
+    
+    fn sequential_shrinking_check(
+        &mut self,
+        alphas_mat: MatRef<f64>,
+        y_mat: MatRef<f64>,
+        grad_mat: MatRef<f64>,
+        c: f64,
+        shrink_tol: f64,
+    ) {
+        let n = alphas_mat.nrows();
+        
+        for i in 0..n {
+            let ai = unsafe { *alphas_mat.get_unchecked(i, 0) };
+            let yi = unsafe { *y_mat.get_unchecked(i, 0) };
+            let gi = unsafe { *grad_mat.get_unchecked(i, 0) };
+            let yi_gi = yi * gi;
+            
+            let at_lower = ai <= 1e-8;
+            let at_upper = ai >= c - 1e-8;
+            
+            let should_shrink = (at_lower && yi_gi >= 1.0 - shrink_tol) || 
+                               (at_upper && yi_gi <= -1.0 + shrink_tol);
+            
+            self.active_mask[i] = !should_shrink;
+            self.violations[i] = if should_shrink { 0.0 } else { yi_gi.abs() };
+        }
+    }
+    
+    fn reset_active_set(&mut self, n: usize) {
+        self.active_mask.fill(true);
+        self.consecutive_no_change = 0;
+        self.shrink_counter = 0;
     }
 }

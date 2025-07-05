@@ -177,7 +177,6 @@ impl Clone for AlignedBuffer {
 unsafe impl Send for AlignedBuffer {}
 unsafe impl Sync for AlignedBuffer {}
 
-// Thread-local memory pool
 pub struct MemoryPool {
     pools: RefCell<Vec<PoolBucket>>,
 }
