@@ -1,6 +1,5 @@
 import numpy as np
-
-from sklearn.datasets import load_breast_cancer, load_iris
+from sklearn.datasets import make_classification
 from sklearn.model_selection import StratifiedShuffleSplit
 from sklearn.metrics import accuracy_score
 from sklearn.svm import SVC
@@ -8,13 +7,25 @@ import my_rust_module
 import time
 from sklearn.preprocessing import StandardScaler
 
-iris = load_iris()
-X, y = iris.data, iris.target
+n_samples = 10000
+n_features = 36
+n_classes = 10
+
+
+X, y = make_classification(
+    n_samples=n_samples,
+    n_features=n_features,
+    n_informative=6,
+    n_redundant=2,
+    n_classes=n_classes,
+    n_clusters_per_class=1,
+    random_state=42
+)
 
 scaler = StandardScaler()
 X = scaler.fit_transform(X)
 
-n_runs   = 100
+n_runs   = 1
 test_pct = 0.3
 
 sss = StratifiedShuffleSplit(
@@ -86,4 +97,3 @@ if speedup_total >= 1:
     print(f"(Gesamtzeit) Rust ist {speedup_total:.2f}× schneller als scikit-learn.")
 else:
     print(f"(Gesamtzeit) Rust ist {1/speedup_total:.2f}× langsamer als scikit-learn.")
-

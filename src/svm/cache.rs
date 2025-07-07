@@ -3,7 +3,6 @@ use crate::svm::kernel::KernelType;
 use crate::svm::memory::AlignedVec;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use rayon::prelude::*;
-use std::hint::black_box;
 
 const CACHE_LINE_SIZE: usize = 64;
 const SET_SIZE: usize = 8;
@@ -165,7 +164,7 @@ impl KernelCache for SetAssociativeCache {
         
         let set = unsafe { self.sets.get_unchecked_mut(set_idx) };
         
-        for (idx, line) in set.iter_mut().enumerate() {
+        for line in set.iter_mut() {
             if line.tag == key {
                 self.hits.fetch_add(1, Ordering::Relaxed);
                 line.lru_counter = 255;

@@ -1,9 +1,9 @@
 use crate::svm::dataset::FlatDataset;
 use crate::svm::cache::{KernelCache, SetAssociativeCache};
 use crate::svm::kernel::KernelType;
-use crate::svm::working_set::{PartialArgMaxSelector, ShrinkingWorkingSet};
-use crate::svm::memory::{AlignedBuffer, get_pooled_vec};
-use faer::{Mat, MatRef, col::ColRef};
+use crate::svm::working_set::{WSS2Selector, WSS2Shrinking};
+use crate::svm::memory::AlignedBuffer;
+use faer::Mat;
 use rayon::prelude::*;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -57,8 +57,9 @@ impl DualSVM {
         let cache_size = self.compute_optimal_cache_size(n);
         let mut kernel_cache = SetAssociativeCache::new(self.kernel.clone(), dataset.clone(), cache_size);
         
-        let mut ws_selector = PartialArgMaxSelector::new(n);
-        let mut shrinking_ws = ShrinkingWorkingSet::new(n);
+        // Verwende WSS2 Selektor
+        let mut ws_selector = WSS2Selector::new(n);
+        let mut shrinking_ws = WSS2Shrinking::new(n);
         
         let mut active_set: Vec<usize> = (0..n).collect();
         let mut iter = 0;
@@ -80,7 +81,8 @@ impl DualSVM {
                 let y_mat = Mat::from_fn(n, 1, |i, _| y[i]);
                 let grad_mat = Mat::from_fn(n, 1, |i, _| grad[i]);
                 
-                active_set = shrinking_ws.update_active_set(
+                // Verwende WSS2 Shrinking
+                active_set = shrinking_ws.update_active_set_wss2(
                     alphas_mat.as_ref(),
                     y_mat.as_ref(),
                     grad_mat.as_ref(),
@@ -92,6 +94,7 @@ impl DualSVM {
                     active_set = (0..n).collect();
                     examine_all = true;
                     stuck_counter = 0;
+                    shrinking_ws.reset(n);
                     continue;
                 }
             }
@@ -112,14 +115,26 @@ impl DualSVM {
             let mut local_changes = 0;
             
             while inner_iter < max_inner {
-                let ws_result = ws_selector.select_working_set_optimized(
-                    &alphas,
-                    &y,
-                    &grad,
-                    self.c,
-                    &mut kernel_cache,
-                    &indices_to_check,
-                );
+                // Nutze WSS2 für große Datensätze
+                let ws_result = if indices_to_check.len() > 1000 {
+                    ws_selector.select_working_set_wss2_parallel(
+                        &alphas,
+                        &y,
+                        &grad,
+                        self.c,
+                        &mut kernel_cache,
+                        &indices_to_check,
+                    )
+                } else {
+                    ws_selector.select_working_set_wss2(
+                        &alphas,
+                        &y,
+                        &grad,
+                        self.c,
+                        &mut kernel_cache,
+                        &indices_to_check,
+                    )
+                };
                 
                 match ws_result {
                     Some(((ii, jj), violation)) => {
@@ -197,7 +212,6 @@ impl DualSVM {
     }
 
     fn compute_optimal_cache_size(&self, n: usize) -> usize {
-
         let available_mb = 1024;
         
         let entry_size = 16;

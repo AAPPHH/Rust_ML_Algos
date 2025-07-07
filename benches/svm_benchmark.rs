@@ -1,12 +1,12 @@
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
-use rand_distr::{Distribution, Normal, Uniform};
+use rand_distr::{Distribution, Normal};
 
 use my_rust_module::svm::{
-    SVM, DualSVM, FlatDataset, KernelType,
+    SVM, FlatDataset, KernelType,
     cache::{KernelCache, SetAssociativeCache},
-    working_set::PartialArgMaxSelector,
+    working_set::WSS2Selector,
 };
 
 fn generate_linear_separable_data(n_samples: usize, n_features: usize, noise: f64) -> (Vec<Vec<f64>>, Vec<f64>) {
@@ -20,7 +20,7 @@ fn generate_linear_separable_data(n_samples: usize, n_features: usize, noise: f6
     let b = rng.gen_range(-1.0..1.0);
     
     for _ in 0..n_samples {
-        let mut sample: Vec<f64> = (0..n_features)
+        let sample: Vec<f64> = (0..n_features)
             .map(|_| rng.gen_range(-10.0..10.0))
             .collect();
         
@@ -125,13 +125,13 @@ fn benchmark_working_set_selection(c: &mut Criterion) {
             &n_samples,
             |b, &n| {
                 let mut cache = SetAssociativeCache::new(kernel.clone(), dataset.clone(), 256);
-                let mut selector = PartialArgMaxSelector::new(n);
+                let mut selector = WSS2Selector::new(n);
                 let alphas = vec![0.1; n];
                 let grad = vec![-1.0; n];
                 let active_indices: Vec<usize> = (0..n).collect();
                 
                 b.iter(|| {
-                    selector.select_working_set_optimized(
+                    selector.select_working_set_wss2(
                         &alphas,
                         &y,
                         &grad,
