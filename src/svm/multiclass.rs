@@ -51,19 +51,19 @@ impl SVM {
             gamma: 0.0,
         }
     }
-
-    pub fn fit(
+    
+    pub fn fit_dataset<'a>(
         &mut self,
-        x: Vec<Vec<f64>>,
+        dataset: FlatDataset<'a>,
         y: Vec<f64>,
         max_iter: usize,
         tol: f64,
     ) -> Result<(), String> {
-        let n_samples = x.len();
+        let n_samples = dataset.n_samples();
         if n_samples == 0 || y.len() != n_samples {
             return Err("Empty data or label size mismatch".to_string());
         }
-        let n_features = x[0].len();
+        let n_features = dataset.n_features();
 
         let mut classes: Vec<f64> = y.clone();
         classes.par_sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
@@ -81,7 +81,6 @@ impl SVM {
             _ => KernelType::Linear,
         };
 
-        let dataset = FlatDataset::from_nested(x);
         let c_val = self.c;
 
         let pairs: Vec<(f64, f64)> = classes
@@ -107,6 +106,7 @@ impl SVM {
                     return (class_a, class_b, DualSVM::new(kernel_def.clone(), c_val));
                 }
 
+                // Erstelle Binary Dataset - muss kopiert werden da wir nur Teilmenge brauchen
                 let mut x_bin_mat = Mat::<f64>::zeros(idx.len(), n_features);
 
                 if idx.len() > 100 && n_features > 100 {
@@ -114,7 +114,7 @@ impl SVM {
                         .par_iter()
                         .enumerate()
                         .map(|(row_idx, &i)| {
-                            let src_row = dataset.data.row(i);
+                            let src_row = dataset.get_row(i);
                             let row_vec: Vec<f64> = (0..n_features).map(|j| src_row[j]).collect();
                             (row_idx, row_vec)
                         })
@@ -127,14 +127,14 @@ impl SVM {
                     }
                 } else {
                     for (row_idx, &i) in idx.iter().enumerate() {
-                        let src_row = dataset.data.row(i);
-                        let mut dst_row = x_bin_mat.row_mut(row_idx);
-                        dst_row.copy_from(src_row);
+                        let src_row = dataset.get_row(i);
+                        for j in 0..n_features {
+                            x_bin_mat[(row_idx, j)] = src_row[j];
+                        }
                     }
                 }
 
-
-                let x_bin = FlatDataset { data: x_bin_mat };
+                let x_bin = FlatDataset::new(x_bin_mat);
 
                 let y_bin: Vec<f64> = idx.iter()
                     .map(|&i| if y[i] == class_a { 1.0 } else { -1.0 })
@@ -155,20 +155,18 @@ impl SVM {
         self.classifiers = classifiers;
         Ok(())
     }
-
-    pub fn predict(&self, x: Vec<Vec<f64>>) -> Vec<f64> {
-        let n_samples = x.len();
+    
+    pub fn predict_dataset(&self, dataset: &FlatDataset) -> Vec<f64> {
+        let n_samples = dataset.n_samples();
         if n_samples == 0 {
             return vec![];
         }
         
-        let dataset = FlatDataset::from_nested(x);
         let n_classes = self.classes.len();
 
         if n_samples < 100 {
-            return self.predict_sequential(&dataset);
+            return self.predict_sequential(dataset);
         }
-
 
         let votes: Vec<Vec<usize>> = (0..n_samples)
             .into_par_iter()
@@ -176,7 +174,7 @@ impl SVM {
             .collect();
 
         self.classifiers.par_iter().for_each(|(class_a, class_b, svm)| {
-            let preds = svm.decision_function_batch(&dataset);
+            let preds = svm.decision_function_batch(dataset);
             let idx_a = self.classes.iter().position(|c| c == class_a).unwrap();
             let idx_b = self.classes.iter().position(|c| c == class_b).unwrap();
             
@@ -231,20 +229,19 @@ impl SVM {
             })
             .collect()
     }
-
-    pub fn predict_proba(&self, x: Vec<Vec<f64>>) -> Vec<Vec<f64>> {
-        let n_samples = x.len();
+    
+    pub fn predict_proba_dataset(&self, dataset: &FlatDataset) -> Vec<Vec<f64>> {
+        let n_samples = dataset.n_samples();
         if n_samples == 0 {
             return vec![];
         }
         
-        let dataset = FlatDataset::from_nested(x);
         let n_classes = self.classes.len();
 
         let mut decision_values = vec![vec![vec![0.0; n_classes]; n_classes]; n_samples];
 
         for (class_a, class_b, svm) in &self.classifiers {
-            let preds = svm.decision_function_batch(&dataset);
+            let preds = svm.decision_function_batch(dataset);
             let idx_a = self.classes.iter().position(|c| c == class_a).unwrap();
             let idx_b = self.classes.iter().position(|c| c == class_b).unwrap();
             

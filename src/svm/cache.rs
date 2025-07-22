@@ -39,9 +39,9 @@ impl CacheLine {
     }
 }
 
-pub struct SetAssociativeCache {
+pub struct SetAssociativeCache<'a> {
     kernel: KernelType,
-    dataset: FlatDataset,
+    dataset: FlatDataset<'a>,
     sets: Vec<Vec<CacheLine>>,
     kernel_diag: AlignedVec<f64>,
     n_sets: usize,
@@ -54,8 +54,8 @@ pub struct SetAssociativeCache {
     lru_counter: AtomicU64,
 }
 
-impl SetAssociativeCache {
-    pub fn new(kernel: KernelType, dataset: FlatDataset, size: usize) -> Self {
+impl<'a> SetAssociativeCache<'a> {
+    pub fn new(kernel: KernelType, dataset: FlatDataset<'a>, size: usize) -> Self {
         let n = dataset.n_samples();
         
         let cache_entries = (size * 1024 * 1024 / 8).max(n * 16).min(256 * 1024 * 1024 / 8);
@@ -145,7 +145,7 @@ impl SetAssociativeCache {
     }
 }
 
-impl KernelCache for SetAssociativeCache {
+impl<'a> KernelCache for SetAssociativeCache<'a> {
     #[inline(always)]
     fn get(&mut self, i: usize, j: usize) -> f64 {
         if i == j {
@@ -353,5 +353,5 @@ impl KernelCache for SetAssociativeCache {
     }
 }
 
-unsafe impl Send for SetAssociativeCache {}
-unsafe impl Sync for SetAssociativeCache {}
+unsafe impl<'a> Send for SetAssociativeCache<'a> {}
+unsafe impl<'a> Sync for SetAssociativeCache<'a> {}

@@ -9,7 +9,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub struct DualSVM {
     pub alphas: Option<Mat<f64>>,
-    pub support_vectors: Option<FlatDataset>,
+    pub support_vectors: Option<FlatDataset<'static>>,
     pub support_labels: Option<Mat<f64>>,
     pub bias: f64,
     pub c: f64,
@@ -41,7 +41,7 @@ impl DualSVM {
         }
     }
 
-    pub fn fit(&mut self, dataset: FlatDataset, y: Vec<f64>, max_iter: usize, tol: f64) {
+    pub fn fit<'a>(&mut self, dataset: FlatDataset<'a>, y: Vec<f64>, max_iter: usize, tol: f64) {
         let n = dataset.n_samples();
         
         let mut alphas = vec![0.0; n];
@@ -55,7 +55,7 @@ impl DualSVM {
         let mut bias = 0.0;
         
         let cache_size = self.compute_optimal_cache_size(n);
-        let mut kernel_cache = SetAssociativeCache::new(self.kernel.clone(), dataset.clone(), cache_size);
+        let mut kernel_cache = SetAssociativeCache::new(self.kernel.clone(), dataset, cache_size);
         
         // Verwende WSS2 Selektor
         let mut ws_selector = WSS2Selector::new(n);
@@ -208,7 +208,9 @@ impl DualSVM {
             }
         }
         
-        self.extract_support_vectors_parallel(alphas, y, dataset, bias);
+        // WICHTIG: Konvertiere dataset zu owned für Support Vectors!
+        let owned_dataset = kernel_cache.dataset.to_owned();
+        self.extract_support_vectors_parallel(alphas, y, owned_dataset, bias);
     }
 
     fn compute_optimal_cache_size(&self, n: usize) -> usize {
@@ -478,7 +480,7 @@ impl DualSVM {
         &mut self,
         alphas: Vec<f64>,
         y: Vec<f64>,
-        dataset: FlatDataset,
+        dataset: FlatDataset<'static>,  // Muss owned sein!
         bias: f64,
     ) {
         let sv_indices: Vec<usize> = (0..alphas.len())
@@ -502,7 +504,7 @@ impl DualSVM {
                 .par_iter()
                 .enumerate()
                 .map(|(idx, &i)| {
-                    let src_row = dataset.data.row(i);
+                    let src_row = dataset.get_row(i);
                     let row_vec: Vec<f64> = (0..n_features).map(|j| src_row[j]).collect();
                     (idx, row_vec)
                 })
@@ -520,15 +522,16 @@ impl DualSVM {
             }
         } else {
             for (idx, &i) in sv_indices.iter().enumerate() {
-                let src_row = dataset.data.row(i);
-                let mut dst_row = sv_data.row_mut(idx);
-                dst_row.copy_from(src_row);
+                let src_row = dataset.get_row(i);
+                for j in 0..n_features {
+                    sv_data[(idx, j)] = src_row[j];
+                }
                 sv_labels[(idx, 0)] = y[i];
                 sv_alphas[(idx, 0)] = alphas[i];
             }
         }
 
-        self.support_vectors = Some(FlatDataset { data: sv_data });
+        self.support_vectors = Some(FlatDataset::new(sv_data));
         self.support_labels = Some(sv_labels);
         self.alphas = Some(sv_alphas);
         self.bias = bias;
@@ -569,7 +572,7 @@ impl DualSVM {
                 
                 for i in chunk {
                     let alpha_y = al[(i, 0)] * sl[(i, 0)];
-                    let sv_row = sv.data.row(i);
+                    let sv_row = sv.get_row(i);
                     
                     for j in 0..n_features {
                         local_w[j] += alpha_y * sv_row[j];
@@ -586,7 +589,7 @@ impl DualSVM {
         } else {
             for i in 0..n_sv {
                 let alpha_y = al[(i, 0)] * sl[(i, 0)];
-                let sv_row = sv.data.row(i);
+                let sv_row = sv.get_row(i);
                 
                 for j in 0..n_features {
                     w[j] += alpha_y * sv_row[j];

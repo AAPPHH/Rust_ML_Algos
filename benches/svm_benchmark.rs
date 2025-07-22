@@ -2,6 +2,7 @@ use criterion::{black_box, criterion_group, criterion_main, Criterion, Benchmark
 use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 use rand_distr::{Distribution, Normal};
+use faer::Mat;
 
 use my_rust_module::svm::{
     SVM, FlatDataset, KernelType,
@@ -9,39 +10,41 @@ use my_rust_module::svm::{
     working_set::WSS2Selector,
 };
 
-fn generate_linear_separable_data(n_samples: usize, n_features: usize, noise: f64) -> (Vec<Vec<f64>>, Vec<f64>) {
+fn generate_dataset(n_samples: usize, n_features: usize) -> (FlatDataset, Vec<f64>) {
     let mut rng = StdRng::seed_from_u64(42);
-    let normal = Normal::new(0.0, noise).unwrap();
+    let normal = Normal::new(0.0, 0.1).unwrap();
     
-    let mut x = Vec::with_capacity(n_samples);
+    let mut data = Mat::<f64>::zeros(n_samples, n_features);
     let mut y = Vec::with_capacity(n_samples);
     
+    // Generate linearly separable data
     let w: Vec<f64> = (0..n_features).map(|_| rng.gen_range(-1.0..1.0)).collect();
     let b = rng.gen_range(-1.0..1.0);
     
-    for _ in 0..n_samples {
-        let sample: Vec<f64> = (0..n_features)
-            .map(|_| rng.gen_range(-10.0..10.0))
-            .collect();
+    for i in 0..n_samples {
+        let mut score = b;
+        for j in 0..n_features {
+            let val = rng.gen_range(-10.0..10.0);
+            data[(i, j)] = val;
+            score += val * w[j];
+        }
         
-        let score: f64 = sample.iter().zip(&w).map(|(xi, wi)| xi * wi).sum::<f64>() + b;
         let label = if score + normal.sample(&mut rng) > 0.0 { 1.0 } else { -1.0 };
-        
         y.push(label);
-        x.push(sample);
     }
     
-    (x, y)
+    (FlatDataset::new(data), y)
 }
 
-fn generate_clusters_data(n_samples: usize, n_features: usize, n_clusters: usize) -> (Vec<Vec<f64>>, Vec<f64>) {
+fn generate_multiclass_dataset(n_samples: usize, n_features: usize, n_classes: usize) -> (FlatDataset, Vec<f64>) {
     let mut rng = StdRng::seed_from_u64(42);
-    let samples_per_cluster = n_samples / n_clusters;
+    let samples_per_class = n_samples / n_classes;
     
-    let mut x = Vec::with_capacity(n_samples);
+    let mut data = Mat::<f64>::zeros(n_samples, n_features);
     let mut y = Vec::with_capacity(n_samples);
     
-    let centers: Vec<Vec<f64>> = (0..n_clusters)
+    // Generate cluster centers
+    let centers: Vec<Vec<f64>> = (0..n_classes)
         .map(|_| {
             (0..n_features)
                 .map(|_| rng.gen_range(-20.0..20.0))
@@ -49,20 +52,23 @@ fn generate_clusters_data(n_samples: usize, n_features: usize, n_clusters: usize
         })
         .collect();
     
-    for (cluster_id, center) in centers.iter().enumerate() {
-        let normal = Normal::new(0.0, 2.0).unwrap();
-        
-        for _ in 0..samples_per_cluster {
-            let sample: Vec<f64> = center.iter()
-                .map(|&c| c + normal.sample(&mut rng))
-                .collect();
+    let normal = Normal::new(0.0, 2.0).unwrap();
+    
+    let mut idx = 0;
+    for (class_id, center) in centers.iter().enumerate() {
+        for _ in 0..samples_per_class {
+            if idx >= n_samples { break; }
             
-            x.push(sample);
-            y.push(cluster_id as f64);
+            for j in 0..n_features {
+                data[(idx, j)] = center[j] + normal.sample(&mut rng);
+            }
+            
+            y.push(class_id as f64);
+            idx += 1;
         }
     }
     
-    (x, y)
+    (FlatDataset::new(data), y)
 }
 
 fn benchmark_kernel_cache(c: &mut Criterion) {
@@ -71,8 +77,7 @@ fn benchmark_kernel_cache(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(2));
     
     for &n_samples in &[100, 1000] {
-        let (x, _) = generate_linear_separable_data(n_samples, 50, 0.1);
-        let dataset = FlatDataset::from_nested(x);
+        let (dataset, _) = generate_dataset(n_samples, 50);
         let kernel = KernelType::new_rbf(0.1);
         
         group.bench_with_input(
@@ -116,8 +121,7 @@ fn benchmark_working_set_selection(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(2));
     
     for &n_samples in &[100, 1000] {
-        let (x, y) = generate_linear_separable_data(n_samples, 50, 0.1);
-        let dataset = FlatDataset::from_nested(x);
+        let (dataset, y) = generate_dataset(n_samples, 50);
         let kernel = KernelType::new_rbf(0.1);
         
         group.bench_with_input(
@@ -153,8 +157,13 @@ fn benchmark_kernel_computations(c: &mut Criterion) {
     group.measurement_time(std::time::Duration::from_secs(2));
     
     for &n_features in &[10, 100] {
-        let x = vec![vec![1.0; n_features]; 2];
-        let dataset = FlatDataset::from_nested(x);
+        let mut data = Mat::<f64>::zeros(2, n_features);
+        for i in 0..2 {
+            for j in 0..n_features {
+                data[(i, j)] = 1.0;
+            }
+        }
+        let dataset = FlatDataset::new(data);
         let row1 = dataset.get_row(0);
         let row2 = dataset.get_row(1);
         
@@ -196,7 +205,7 @@ fn benchmark_full_training(c: &mut Criterion) {
     group.warm_up_time(std::time::Duration::from_secs(1));
     
     for &n_samples in &[100] {
-        let (x, y) = generate_linear_separable_data(n_samples, 10, 0.1);
+        let (dataset, y) = generate_dataset(n_samples, 10);
         
         group.bench_with_input(
             BenchmarkId::new("linear_svm", n_samples),
@@ -204,7 +213,7 @@ fn benchmark_full_training(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let mut svm = SVM::linear(1.0);
-                    svm.fit(x.clone(), y.clone(), 10, 1e-1).unwrap();
+                    svm.fit_dataset(dataset.clone(), y.clone(), 10, 1e-1).unwrap();
                 });
             }
         );
@@ -215,12 +224,12 @@ fn benchmark_full_training(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let mut svm = SVM::rbf(0.1, 1.0);
-                    svm.fit(x.clone(), y.clone(), 10, 1e-1).unwrap();
+                    svm.fit_dataset(dataset.clone(), y.clone(), 10, 1e-1).unwrap();
                 });
             }
         );
         
-        let (x_multi, y_multi) = generate_clusters_data(n_samples, 10, 3);
+        let (dataset_multi, y_multi) = generate_multiclass_dataset(n_samples, 10, 3);
         
         group.bench_with_input(
             BenchmarkId::new("multiclass_linear", n_samples),
@@ -228,7 +237,7 @@ fn benchmark_full_training(c: &mut Criterion) {
             |b, _| {
                 b.iter(|| {
                     let mut svm = SVM::linear(1.0);
-                    svm.fit(x_multi.clone(), y_multi.clone(), 10, 1e-1).unwrap();
+                    svm.fit_dataset(dataset_multi.clone(), y_multi.clone(), 10, 1e-1).unwrap();
                 });
             }
         );
@@ -242,30 +251,30 @@ fn benchmark_prediction(c: &mut Criterion) {
     group.sample_size(10);
     group.measurement_time(std::time::Duration::from_secs(3));
     
-    let (x_train, y_train) = generate_linear_separable_data(200, 10, 0.1);
+    let (dataset_train, y_train) = generate_dataset(200, 10);
     
     let mut linear_svm = SVM::linear(1.0);
     println!("Training linear SVM for prediction benchmark...");
-    if let Err(e) = linear_svm.fit(x_train.clone(), y_train.clone(), 30, 1e-2) {
+    if let Err(e) = linear_svm.fit_dataset(dataset_train.clone(), y_train.clone(), 30, 1e-2) {
         println!("Linear SVM training failed: {:?}", e);
         return;
     }
     
     let mut rbf_svm = SVM::rbf(0.1, 1.0);
     println!("Training RBF SVM for prediction benchmark...");
-    if let Err(e) = rbf_svm.fit(x_train.clone(), y_train.clone(), 30, 1e-2) {
+    if let Err(e) = rbf_svm.fit_dataset(dataset_train.clone(), y_train.clone(), 30, 1e-2) {
         println!("RBF SVM training failed: {:?}", e);
         return;
     }
     
     for &n_samples in &[10, 100] {
-        let (x_test, _) = generate_linear_separable_data(n_samples, 10, 0.1);
+        let (dataset_test, _) = generate_dataset(n_samples, 10);
         
         group.bench_with_input(
             BenchmarkId::new("linear_predict", n_samples),
             &n_samples,
             |b, _| {
-                b.iter(|| linear_svm.predict(x_test.clone()));
+                b.iter(|| linear_svm.predict_dataset(&dataset_test));
             }
         );
         
@@ -273,7 +282,7 @@ fn benchmark_prediction(c: &mut Criterion) {
             BenchmarkId::new("rbf_predict", n_samples),
             &n_samples,
             |b, _| {
-                b.iter(|| rbf_svm.predict(x_test.clone()));
+                b.iter(|| rbf_svm.predict_dataset(&dataset_test));
             }
         );
     }
