@@ -1,14 +1,16 @@
-use crate::svm::dataset::FlatDataset;
+use crate::svm::dataset::{SvmDataset, FlatDataset}; // Geändert
 use crate::svm::kernel::KernelType;
 use crate::svm::memory::AlignedVec;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use rayon::prelude::*;
+use std::marker::PhantomData;
 
 const CACHE_LINE_SIZE: usize = 64;
 const SET_SIZE: usize = 8;
 const PREFETCH_DISTANCE: usize = 8;
 const ROW_CACHE_SIZE: usize = 64;
 
+// Trait bleibt unverändert
 pub trait KernelCache: Send + Sync {
     fn get(&mut self, i: usize, j: usize) -> f64;
     fn get_diagonal(&self, i: usize) -> f64;
@@ -17,6 +19,7 @@ pub trait KernelCache: Send + Sync {
     fn prefetch_row(&mut self, i: usize);
     fn hash_key(&self, i: usize, j: usize) -> (u64, usize);
     fn prefetch_cache_line(&self, set_idx: usize);
+    fn dataset_to_owned(&self) -> FlatDataset<'static>; // Hinzugefügt
 }
 
 #[repr(align(64))]
@@ -39,9 +42,12 @@ impl CacheLine {
     }
 }
 
-pub struct SetAssociativeCache<'a> {
+//++++++++++++++++++++++++++++++++++++++++++//
+//+ CACHE IST JETZT GENERISCH ÜBER DATASET +//
+//++++++++++++++++++++++++++++++++++++++++++//
+pub struct SetAssociativeCache<'a, D: SvmDataset<'a>> {
     kernel: KernelType,
-    dataset: FlatDataset<'a>,
+    dataset: D,
     sets: Vec<Vec<CacheLine>>,
     kernel_diag: AlignedVec<f64>,
     n_sets: usize,
@@ -52,10 +58,11 @@ pub struct SetAssociativeCache<'a> {
     row_cache_tags: Vec<AtomicUsize>,
     row_cache_counters: Vec<AtomicUsize>,
     lru_counter: AtomicU64,
+    _phantom: PhantomData<&'a ()>,
 }
 
-impl<'a> SetAssociativeCache<'a> {
-    pub fn new(kernel: KernelType, dataset: FlatDataset<'a>, size: usize) -> Self {
+impl<'a, D: SvmDataset<'a>> SetAssociativeCache<'a, D> {
+    pub fn new(kernel: KernelType, dataset: D, size: usize) -> Self {
         let n = dataset.n_samples();
         
         let cache_entries = (size * 1024 * 1024 / 8).max(n * 16).min(256 * 1024 * 1024 / 8);
@@ -112,9 +119,11 @@ impl<'a> SetAssociativeCache<'a> {
             row_cache_tags,
             row_cache_counters,
             lru_counter: AtomicU64::new(0),
+            _phantom: PhantomData,
         }
     }
     
+    // Unveränderte private Methoden...
     #[inline(always)]
     fn hash_key(&self, i: usize, j: usize) -> (u64, usize) {
         let (i_min, j_max) = if i < j { (i, j) } else { (j, i) };
@@ -139,13 +148,14 @@ impl<'a> SetAssociativeCache<'a> {
     }
     
     #[inline]
-    fn should_cache_row(&self, i: usize) -> bool {
+    fn should_cache_row(&self, _i: usize) -> bool {
         let access_count = self.lru_counter.fetch_add(1, Ordering::Relaxed);
-        (access_count % 10) == 0 || i < 100
+        (access_count % 10) == 0
     }
 }
 
-impl<'a> KernelCache for SetAssociativeCache<'a> {
+
+impl<'a, D: SvmDataset<'a>> KernelCache for SetAssociativeCache<'a, D> {
     #[inline(always)]
     fn get(&mut self, i: usize, j: usize) -> f64 {
         if i == j {
@@ -351,7 +361,8 @@ impl<'a> KernelCache for SetAssociativeCache<'a> {
             _mm_prefetch(ptr, _MM_HINT_T0);
         }
     }
+    
+    fn dataset_to_owned(&self) -> FlatDataset<'static> {
+        self.dataset.to_owned()
+    }
 }
-
-unsafe impl<'a> Send for SetAssociativeCache<'a> {}
-unsafe impl<'a> Sync for SetAssociativeCache<'a> {}

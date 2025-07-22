@@ -7,7 +7,7 @@ import my_rust_module
 import time
 from sklearn.preprocessing import StandardScaler
 
-n_samples = 10000
+n_samples = 2000
 n_features = 36
 n_classes = 10
 

@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use pyo3::exceptions::PyValueError;
 use numpy::{PyArray1, PyArray2, PyReadonlyArray1, PyReadonlyArray2};
 use crate::svm::multiclass::SVM;
-use crate::svm::dataset::{FlatDataset, DatasetStorage};
+use crate::svm::dataset::{FlatDataset, DatasetStorage, SvmDataset}; // KORREKTUR: SvmDataset importiert
 
 #[pyclass]
 pub struct PySVM {
@@ -11,6 +11,7 @@ pub struct PySVM {
 
 #[pymethods]
 impl PySVM {
+    // ... (unveränderter Code bis n_support)
     #[staticmethod]
     pub fn poly(degree: u32, coef0: f64, c: f64, gamma: Option<f64>) -> Self {
         PySVM { inner: SVM::poly(degree, coef0, c, gamma) }
@@ -54,8 +55,6 @@ impl PySVM {
 
     pub fn predict(&self, x: PyReadonlyArray2<f64>) -> PyResult<Py<PyArray1<f64>>> {
         let x_array = x.as_array();
-        
-        // Zero-Copy für die Vorhersage
         let dataset = FlatDataset::from_numpy_array(x_array);
         
         let predictions = Python::with_gil(|py| {
@@ -72,8 +71,6 @@ impl PySVM {
     pub fn predict_proba(&self, x: PyReadonlyArray2<f64>) -> PyResult<Py<PyArray2<f64>>> {
         let x_array = x.as_array();
         let n_samples = x_array.shape()[0];
-        
-        // Zero-Copy für die Vorhersage
         let dataset = FlatDataset::from_numpy_array(x_array);
 
         let proba = Python::with_gil(|py| {
@@ -83,7 +80,7 @@ impl PySVM {
         });
 
         Python::with_gil(|py| {
-            let n_classes = proba[0].len();
+            let n_classes = if proba.is_empty() { 0 } else { proba[0].len() };
             let flat: Vec<f64> = proba.into_iter().flatten().collect();
             let array = PyArray1::from_vec(py, flat);
             Ok(array.reshape((n_samples, n_classes))?.to_owned())
@@ -92,10 +89,7 @@ impl PySVM {
     
     pub fn decision_function(&self, x: PyReadonlyArray2<f64>) -> PyResult<Vec<Py<PyArray1<f64>>>> {
         let x_array = x.as_array();
-        
-        // Zero-Copy für die Vorhersage
         let dataset = FlatDataset::from_numpy_array(x_array);
-        
         let n_classifiers = self.inner.classifiers.len();
         let mut all_decisions = vec![vec![]; n_classifiers];
         
@@ -131,9 +125,10 @@ impl PySVM {
         
         for (class_a, class_b, svm) in &self.inner.classifiers {
             if let Some(ref sv) = svm.support_vectors {
+                // KORREKTUR: n_samples() ist jetzt eine Trait-Methode und SvmDataset muss im Scope sein.
                 let n_sv = sv.n_samples();
-                let idx_a = self.inner.classes.iter().position(|c| c == class_a).unwrap();
-                let idx_b = self.inner.classes.iter().position(|c| c == class_b).unwrap();
+                let idx_a = self.inner.classes.iter().position(|&c| c == *class_a).unwrap();
+                let idx_b = self.inner.classes.iter().position(|&c| c == *class_b).unwrap();
                 counts[idx_a] += n_sv / 2;
                 counts[idx_b] += (n_sv + 1) / 2;
             }
@@ -142,6 +137,7 @@ impl PySVM {
         counts
     }
     
+    // Rest der Datei ist unverändert...
     #[getter]
     pub fn support_vectors(&self) -> PyResult<Vec<Py<PyArray2<f64>>>> {
         Python::with_gil(|py| {
@@ -228,7 +224,6 @@ impl PySVM {
             .collect()
     }
     
-    /// Erstellt eine Kopie des SVM mit allen Daten
     pub fn copy(&self) -> PyResult<Self> {
         Ok(PySVM {
             inner: SVM {

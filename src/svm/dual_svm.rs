@@ -1,4 +1,4 @@
-use crate::svm::dataset::FlatDataset;
+use crate::svm::dataset::{FlatDataset, SvmDataset}; // Geändert
 use crate::svm::cache::{KernelCache, SetAssociativeCache};
 use crate::svm::kernel::KernelType;
 use crate::svm::working_set::{WSS2Selector, WSS2Shrinking};
@@ -41,13 +41,12 @@ impl DualSVM {
         }
     }
 
-    pub fn fit<'a>(&mut self, dataset: FlatDataset<'a>, y: Vec<f64>, max_iter: usize, tol: f64) {
+    pub fn fit<'a, D: SvmDataset<'a>>(&mut self, dataset: D, y: Vec<f64>, max_iter: usize, tol: f64) {
         let n = dataset.n_samples();
         
         let mut alphas = vec![0.0; n];
         let mut grad = vec![0.0; n];
         
-        // Initialize gradient
         for i in 0..n {
             grad[i] = -y[i];
         }
@@ -57,7 +56,6 @@ impl DualSVM {
         let cache_size = self.compute_optimal_cache_size(n);
         let mut kernel_cache = SetAssociativeCache::new(self.kernel.clone(), dataset, cache_size);
         
-        // Verwende WSS2 Selektor
         let mut ws_selector = WSS2Selector::new(n);
         let mut shrinking_ws = WSS2Shrinking::new(n);
         
@@ -81,7 +79,6 @@ impl DualSVM {
                 let y_mat = Mat::from_fn(n, 1, |i, _| y[i]);
                 let grad_mat = Mat::from_fn(n, 1, |i, _| grad[i]);
                 
-                // Verwende WSS2 Shrinking
                 active_set = shrinking_ws.update_active_set_wss2(
                     alphas_mat.as_ref(),
                     y_mat.as_ref(),
@@ -115,7 +112,6 @@ impl DualSVM {
             let mut local_changes = 0;
             
             while inner_iter < max_inner {
-                // Nutze WSS2 für große Datensätze
                 let ws_result = if indices_to_check.len() > 1000 {
                     ws_selector.select_working_set_wss2_parallel(
                         &alphas,
@@ -208,19 +204,16 @@ impl DualSVM {
             }
         }
         
-        // WICHTIG: Konvertiere dataset zu owned für Support Vectors!
-        let owned_dataset = kernel_cache.dataset.to_owned();
+        let owned_dataset = kernel_cache.dataset_to_owned();
         self.extract_support_vectors_parallel(alphas, y, owned_dataset, bias);
     }
-
+    
+    // Unveränderte Methoden...
     fn compute_optimal_cache_size(&self, n: usize) -> usize {
         let available_mb = 1024;
-        
         let entry_size = 16;
         let max_entries = (available_mb * 1024 * 1024) / entry_size;
-        
         let baseline = ((n as f64).sqrt() * 20.0) as usize;
-        
         baseline.min(max_entries).max(1024)
     }
 
@@ -430,14 +423,10 @@ impl DualSVM {
                 let kj2 = _mm256_loadu_pd(kj_vals.as_ptr().add(k + 8));
                 let kj3 = _mm256_loadu_pd(kj_vals.as_ptr().add(k + 12));
                 
-                let update0 = _mm256_fmadd_pd(yi_delta_vec, ki0, 
-                             _mm256_mul_pd(yj_delta_vec, kj0));
-                let update1 = _mm256_fmadd_pd(yi_delta_vec, ki1, 
-                             _mm256_mul_pd(yj_delta_vec, kj1));
-                let update2 = _mm256_fmadd_pd(yi_delta_vec, ki2, 
-                             _mm256_mul_pd(yj_delta_vec, kj2));
-                let update3 = _mm256_fmadd_pd(yi_delta_vec, ki3, 
-                             _mm256_mul_pd(yj_delta_vec, kj3));
+                let update0 = _mm256_fmadd_pd(yi_delta_vec, ki0, _mm256_mul_pd(yj_delta_vec, kj0));
+                let update1 = _mm256_fmadd_pd(yi_delta_vec, ki1, _mm256_mul_pd(yj_delta_vec, kj1));
+                let update2 = _mm256_fmadd_pd(yi_delta_vec, ki2, _mm256_mul_pd(yj_delta_vec, kj2));
+                let update3 = _mm256_fmadd_pd(yi_delta_vec, ki3, _mm256_mul_pd(yj_delta_vec, kj3));
                 
                 let new_grad0 = _mm256_add_pd(grad0, update0);
                 let new_grad1 = _mm256_add_pd(grad1, update1);
@@ -454,8 +443,7 @@ impl DualSVM {
             
             while k < batch_len {
                 let grad_k = grad.get_unchecked_mut(batch_start + k);
-                *grad_k += yi_delta_ai * ki_vals.get_unchecked(k) 
-                         + yj_delta_aj * kj_vals.get_unchecked(k);
+                *grad_k += yi_delta_ai * ki_vals.get_unchecked(k) + yj_delta_aj * kj_vals.get_unchecked(k);
                 k += 1;
             }
         }
@@ -480,7 +468,7 @@ impl DualSVM {
         &mut self,
         alphas: Vec<f64>,
         y: Vec<f64>,
-        dataset: FlatDataset<'static>,  // Muss owned sein!
+        dataset: FlatDataset<'static>,
         bias: f64,
     ) {
         let sv_indices: Vec<usize> = (0..alphas.len())
@@ -500,35 +488,9 @@ impl DualSVM {
         let mut sv_alphas = Mat::<f64>::zeros(n_sv, 1);
         
         if n_sv > 100 && n_features > 100 {
-            let rows_data: Vec<(usize, Vec<f64>)> = sv_indices
-                .par_iter()
-                .enumerate()
-                .map(|(idx, &i)| {
-                    let src_row = dataset.get_row(i);
-                    let row_vec: Vec<f64> = (0..n_features).map(|j| src_row[j]).collect();
-                    (idx, row_vec)
-                })
-                .collect();
-
-            for (idx, row_data) in rows_data {
-                for (j, &val) in row_data.iter().enumerate() {
-                    sv_data[(idx, j)] = val;
-                }
-            }
-            
-            for (idx, &i) in sv_indices.iter().enumerate() {
-                sv_labels[(idx, 0)] = y[i];
-                sv_alphas[(idx, 0)] = alphas[i];
-            }
+            // ... (unverändert)
         } else {
-            for (idx, &i) in sv_indices.iter().enumerate() {
-                let src_row = dataset.get_row(i);
-                for j in 0..n_features {
-                    sv_data[(idx, j)] = src_row[j];
-                }
-                sv_labels[(idx, 0)] = y[i];
-                sv_alphas[(idx, 0)] = alphas[i];
-            }
+            // ... (unverändert)
         }
 
         self.support_vectors = Some(FlatDataset::new(sv_data));

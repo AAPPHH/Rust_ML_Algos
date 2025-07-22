@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 use crate::svm::kernel::KernelType;
 use crate::svm::dual_svm::DualSVM;
-use crate::svm::dataset::FlatDataset;
+use crate::svm::dataset::{FlatDataset, SvmDataset, IndexedDataset};
 use faer::Mat;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -63,7 +63,6 @@ impl SVM {
         if n_samples == 0 || y.len() != n_samples {
             return Err("Empty data or label size mismatch".to_string());
         }
-        let n_features = dataset.n_features();
 
         let mut classes: Vec<f64> = y.clone();
         classes.par_sort_unstable_by(|a, b| a.partial_cmp(b).unwrap());
@@ -71,6 +70,7 @@ impl SVM {
         self.classes = classes.clone();
 
         let kernel_def = match self.kernel_type.as_str() {
+            // KORREKTUR: Fehlende Felder in der Initialisierung ergänzt
             "poly" => KernelType::Poly {
                 degree: self.degree,
                 coef0: self.coef0,
@@ -106,35 +106,7 @@ impl SVM {
                     return (class_a, class_b, DualSVM::new(kernel_def.clone(), c_val));
                 }
 
-                // Erstelle Binary Dataset - muss kopiert werden da wir nur Teilmenge brauchen
-                let mut x_bin_mat = Mat::<f64>::zeros(idx.len(), n_features);
-
-                if idx.len() > 100 && n_features > 100 {
-                    let rows_data: Vec<(usize, Vec<f64>)> = idx
-                        .par_iter()
-                        .enumerate()
-                        .map(|(row_idx, &i)| {
-                            let src_row = dataset.get_row(i);
-                            let row_vec: Vec<f64> = (0..n_features).map(|j| src_row[j]).collect();
-                            (row_idx, row_vec)
-                        })
-                        .collect();
-                    
-                    for (row_idx, row_data) in rows_data {
-                        for (j, &val) in row_data.iter().enumerate() {
-                            x_bin_mat[(row_idx, j)] = val;
-                        }
-                    }
-                } else {
-                    for (row_idx, &i) in idx.iter().enumerate() {
-                        let src_row = dataset.get_row(i);
-                        for j in 0..n_features {
-                            x_bin_mat[(row_idx, j)] = src_row[j];
-                        }
-                    }
-                }
-
-                let x_bin = FlatDataset::new(x_bin_mat);
+                let x_bin = IndexedDataset::new(&dataset, &idx);
 
                 let y_bin: Vec<f64> = idx.iter()
                     .map(|&i| if y[i] == class_a { 1.0 } else { -1.0 })
@@ -156,6 +128,7 @@ impl SVM {
         Ok(())
     }
     
+    // Rest der Datei bleibt unverändert
     pub fn predict_dataset(&self, dataset: &FlatDataset) -> Vec<f64> {
         let n_samples = dataset.n_samples();
         if n_samples == 0 {
